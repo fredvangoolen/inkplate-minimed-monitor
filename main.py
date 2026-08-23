@@ -1055,7 +1055,7 @@ def draw_screen(inkplate, state):
    sg_txt = str(state["sg"]) if state["sg"] is not None else "---"
    glucose_color = BLACK
    if state["sg"] is not None:
-      if state["sg"] >= HYPER_THRESHOLD_MGDL or state["sg"] <= HYPO_THRESHOLD_MGDL:
+      if state["sg"] > HYPER_THRESHOLD_MGDL or state["sg"] < HYPO_THRESHOLD_MGDL:
          glucose_color = RED
 
    GLUCOSE_SIZE = 4
