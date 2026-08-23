@@ -1045,7 +1045,13 @@ def draw_screen(inkplate, state):
    WHITE = inkplate.WHITE
    RED   = inkplate.RED
 
-   # --- Glucose number, its unit/trend beside it, and active insulin ---
+   # --- Glucose number on the left; trend/unit/active-insulin stacked in
+   # a right-hand column occupying the SAME vertical band (not below the
+   # number - there's no room below at this font size). Active insulin
+   # moved up here (was its own full-width row below the glucose number)
+   # specifically to free up two full rows at the bottom for the alarm
+   # banner and the "Updated" timestamp to both be visible at once - see
+   # the comment above that section for why they used to share one row. ---
    sg_txt = str(state["sg"]) if state["sg"] is not None else "---"
    glucose_color = BLACK
    if state["sg"] is not None:
@@ -1059,40 +1065,60 @@ def draw_screen(inkplate, state):
    inkplate.set_cursor(gx, gy)
    inkplate.print(sg_txt)
    gw = text_width(inkplate, sg_txt, GLUCOSE_SIZE)
-   gh = FONT_HEIGHT_1X * GLUCOSE_SIZE
+   gh = FONT_HEIGHT_1X * GLUCOSE_SIZE  # 64px at GLUCOSE_SIZE=4
 
-   # Trend glyph and "mg/dL" sit to the right of the number (same vertical
-   # band it occupies), not below it - there's no room below at this font
-   # size without colliding into the active-insulin row.
    side_x = gx + gw + 6
    inkplate.set_text_size(2)
    inkplate.set_text_color(BLACK)
    inkplate.set_cursor(side_x, gy)
    inkplate.print(TREND_GLYPH.get(state["trend"], "->"))
 
+   # Tightly packed (no gaps) so trend(32px) + mg/dL(16px) + insulin(16px)
+   # = 64px exactly matches the glucose number's own height - any gap here
+   # would push the insulin line past gy+gh and misalign it against the
+   # "Updated"/alarm rows below, which are positioned relative to gy+gh.
+   mgdl_y = gy + FONT_HEIGHT_1X*2
    inkplate.set_text_size(1)
    inkplate.set_text_color(BLACK)
-   inkplate.set_cursor(side_x, gy + FONT_HEIGHT_1X*2 + 4)
+   inkplate.set_cursor(side_x, mgdl_y)
    inkplate.print("mg/dL")
 
-   insulin_y = gy + gh + 2
+   insulin_label_y = mgdl_y + FONT_HEIGHT_1X
+   inkplate.set_cursor(side_x, insulin_label_y)
+   insulin_txt = "%.1f U (act. insulin)" % state["active_insulin"] if state["active_insulin"] is not None else "-- U (act. insulin)"
+   max_insulin_w = PANEL_W - side_x - 2
+   inkplate.print(truncate_to_width(inkplate, insulin_txt, max_insulin_w, 1))
+
+   # --- Two dedicated bottom rows, always both drawn: the "Updated"
+   # timestamp (row A) and, only when active, the alarm/pump banner
+   # (row B) - previously these shared one row, so an active alarm hid
+   # the timestamp entirely. The timestamp serves two purposes: you don't
+   # need to stare at the panel waiting for the next ~17-23s refresh to
+   # know whether what's showing is current, and a timestamp that stops
+   # advancing is how you'd notice the device's battery died (staleness
+   # signal).
+   row_a_y = gy + gh + 2
    inkplate.set_text_size(1)
    inkplate.set_text_color(BLACK)
-   inkplate.set_cursor(2, insulin_y)
-   if state["active_insulin"] is not None:
-      inkplate.print("%.1f U active insulin" % state["active_insulin"])
+   inkplate.set_cursor(2, row_a_y)
+   if state["last_update_tm"] is not None:
+      now = local_now(current_timezone[0], dstDelta)
+      delta_txt = time_delta(state["last_update_tm"], now, current_timezone[0])
+      # The bracketed clock time is the moment THIS PANEL REFRESH
+      # happened (now), not the CGM reading's own timestamp - "Updated
+      # 4 min ago (09:55)" means the reading was from 9:51 but this
+      # display last redrew itself at 9:55. Since the panel only
+      # redraws once per ~5-minute cycle, this whole line - both the
+      # relative delta and the absolute clock time - is computed once
+      # and then stays static/unchanging on-screen until the next
+      # cycle, by construction (e-paper doesn't tick live).
+      hh, mm = now[3], now[4]
+      age_txt = "Updated %s (%02d:%02d)" % (delta_txt, hh, mm)
    else:
-      inkplate.print("-- U active insulin")
+      age_txt = "No data"
+   inkplate.print(truncate_to_width(inkplate, age_txt, PANEL_W-4, 1))
 
-   # --- Bottom row: alarm banner when active, else a "last updated"
-   # timestamp (share the row - the alarm, being safety-relevant, takes
-   # priority over the informational timestamp when both would apply).
-   # The timestamp serves two purposes: you don't need to stare at the
-   # panel waiting for the next ~17-23s refresh to know whether what's
-   # showing is current, and a timestamp that stops advancing is how
-   # you'd notice the device's battery died (staleness signal).
-   bottom_y = insulin_y + FONT_HEIGHT_1X + 2
-   inkplate.set_text_size(1)
+   row_b_y = row_a_y + FONT_HEIGHT_1X + 2
    if banner_text:
       # For a genuine pump alarm (not the generic systemStatusMessage/
       # pumpBannerState banner, neither of which carries a comparable
@@ -1105,30 +1131,11 @@ def draw_screen(inkplate, state):
       if state["alarm_text"] and state["alarm_tm"] is not None:
          hh, mm = state["alarm_tm"][3], state["alarm_tm"][4]
          suffix = " (%02d:%02d)" % (hh, mm)
-      inkplate.fill_rect(0, bottom_y, PANEL_W, FONT_HEIGHT_1X, RED)
+      inkplate.fill_rect(0, row_b_y, PANEL_W, FONT_HEIGHT_1X, RED)
       inkplate.set_text_color(WHITE)
-      inkplate.set_cursor(1, bottom_y)
+      inkplate.set_cursor(1, row_b_y)
       max_w = PANEL_W - 2 - text_width(inkplate, suffix, 1)
       inkplate.print(truncate_to_width(inkplate, banner_text, max_w, 1) + suffix)
-   else:
-      if state["last_update_tm"] is not None:
-         now = local_now(current_timezone[0], dstDelta)
-         delta_txt = time_delta(state["last_update_tm"], now, current_timezone[0])
-         # The bracketed clock time is the moment THIS PANEL REFRESH
-         # happened (now), not the CGM reading's own timestamp - "Updated
-         # 4 min ago (09:55)" means the reading was from 9:51 but this
-         # display last redrew itself at 9:55. Since the panel only
-         # redraws once per ~5-minute cycle, this whole line - both the
-         # relative delta and the absolute clock time - is computed once
-         # and then stays static/unchanging on-screen until the next
-         # cycle, by construction (e-paper doesn't tick live).
-         hh, mm = now[3], now[4]
-         age_txt = "Updated %s (%02d:%02d)" % (delta_txt, hh, mm)
-      else:
-         age_txt = "No data"
-      inkplate.set_text_color(BLACK)
-      inkplate.set_cursor(2, bottom_y)
-      inkplate.print(truncate_to_width(inkplate, age_txt, PANEL_W-4, 1))
 
    inkplate.display()
    _set_banner_flag(bool(banner_text))
