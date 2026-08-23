@@ -43,7 +43,7 @@ See the comments at the top of `main.py` for further hardware/firmware quirks th
 
 ## How it works
 
-[`docs/internals.html`](docs/internals.html) is a full visual walkthrough of the whole pipeline — pump and CGM sensor, Medtronic Carelink Cloud, the self-hosted proxy, and this device's own wake/fetch/draw/sleep cycle — with flowcharts for the alarm-decision logic and first-time setup, an annotated mock of the panel layout, and a complete reference of the Python code and library calls. Open it directly in a browser (it renders standalone, including its diagrams).
+[`docs/internals.html`](docs/internals.html) is a full visual walkthrough of the whole pipeline — pump and CGM sensor, Medtronic Carelink Cloud, the self-hosted proxy, and this device's own wake/fetch/draw/sleep cycle — with flowcharts for the alarm-decision logic and first-time setup, an annotated mock of the panel layout, and a complete reference of the Python code and library calls. Open it directly in a browser (it renders standalone, including its diagrams), or read [`docs/internals.pdf`](docs/internals.pdf) for the same document as a PDF.
 
 ## Credits
 
