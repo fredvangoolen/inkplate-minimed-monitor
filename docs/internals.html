@@ -401,23 +401,39 @@
     html { scroll-behavior: auto; }
   }
 
+  @page {
+    size: A4 portrait;
+    margin: 18mm 16mm;
+  }
+
   @media print {
+    html, body { font-size: 15px; }
+    main { padding: 0 !important; max-width: none; }
+    .page { max-width: none; }
+
     /* Chrome's print layout engine avoids splitting a tall block by
        pushing it whole onto the next page - without a height cap, a
        mermaid diagram taller than one page leaves the rest of the
        current page blank. Capping height (with width auto to keep
-       aspect ratio) guarantees every diagram fits inside one page, so
+       aspect ratio) guarantees every diagram fits within A4's usable
+       content height (297mm page, 18mm top+bottom margins, plus room
+       for the heading/intro text a diagram usually starts below), so
        break-inside: avoid below can actually do its job instead of
        fighting an element it can never make fit. */
     pre.mermaid svg, figure svg {
-      max-height: 8.6in !important;
+      max-height: 200mm !important;
       width: auto !important;
       max-width: 100% !important;
       margin: 0 auto;
     }
-    section, figure, .callout, .table-wrap, .stat-strip { break-inside: avoid; }
+    /* Deliberately NOT section here - protecting a whole section (prose
+       and all) rather than just the parts that actually can't be split
+       pushed entire sections onto fresh pages, leaving large trailing
+       gaps behind. Paragraph text breaking across a page is normal in
+       any printed document; a diagram or table splitting mid-row isn't. */
+    figure, .callout, .table-wrap, .stat-strip { break-inside: avoid; }
     h1, h2, h3 { break-after: avoid; }
-    nav.toc { break-after: page; }
+    nav.toc { break-inside: avoid; }
     a { color: var(--ink); }
   }
 </style>
