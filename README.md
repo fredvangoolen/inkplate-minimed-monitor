@@ -41,6 +41,10 @@ Config is persisted as JSON at `/minimed_config.json` on the device. To reset it
 
 See the comments at the top of `main.py` for further hardware/firmware quirks this design works around.
 
+## How it works
+
+[`docs/internals.html`](docs/internals.html) is a full visual walkthrough of the whole pipeline — pump and CGM sensor, Medtronic Carelink Cloud, the self-hosted proxy, and this device's own wake/fetch/draw/sleep cycle — with flowcharts for the alarm-decision logic and first-time setup, an annotated mock of the panel layout, and a complete reference of the Python code and library calls. Open it directly in a browser (it renders standalone, including its diagrams).
+
 ## Credits
 
 This project builds on and was originally inspired by [Ondrej Wisniewski](https://github.com/ondrej1024)'s **M5 Minimed Monitor**, an M5Stack-based version of the same idea — notably the fault-code lookup tables in `main.py`, which were reverse-engineered from real Carelink pump alarm data, and the overall data-polling/config/AP-setup design this project builds on. The e-paper display this runs on has different enough constraints that the GUI, timing, and alarm-handling code here is a fresh design rather than a port.

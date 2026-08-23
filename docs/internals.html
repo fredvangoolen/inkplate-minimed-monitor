@@ -1,0 +1,796 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inkplate Monitor Internals</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,340;9..144,480;9..144,620&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<style>
+  :root {
+    --paper: #faf6ee;
+    --paper-raised: #f2ead9;
+    --paper-sunken: #efe6d2;
+    --ink: #211d18;
+    --ink-muted: #6b5f4f;
+    --ink-faint: #a89c86;
+    --rule: #ddd2bc;
+    --rule-strong: #c7b99a;
+    --red: #b8382a;
+    --red-ink: #7a2519;
+    --red-soft: #f2dad3;
+    --red-soft-rule: #e0b8ac;
+    --teal: #2b6e63;
+    --teal-soft: #dceae5;
+    --teal-soft-rule: #b9d6cc;
+    --amber: #a6721e;
+    --amber-soft: #f3e7d0;
+    --amber-soft-rule: #dfc48c;
+    --code-bg: #efe6d2;
+    --shadow: 0 1px 2px rgba(33,29,24,0.06), 0 6px 20px rgba(33,29,24,0.05);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #1b1815;
+      --paper-raised: #262119;
+      --paper-sunken: #16130f;
+      --ink: #ede6d6;
+      --ink-muted: #b3a78f;
+      --ink-faint: #7c7362;
+      --rule: #3a342a;
+      --rule-strong: #4d4534;
+      --red: #e0584a;
+      --red-ink: #f4a99c;
+      --red-soft: #3a211d;
+      --red-soft-rule: #5c332b;
+      --teal: #6cb8a9;
+      --teal-soft: #1e2e2a;
+      --teal-soft-rule: #33473f;
+      --amber: #d0973e;
+      --amber-soft: #332512;
+      --amber-soft-rule: #4f3a1c;
+      --code-bg: #221d16;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #1b1815;
+    --paper-raised: #262119;
+    --paper-sunken: #16130f;
+    --ink: #ede6d6;
+    --ink-muted: #b3a78f;
+    --ink-faint: #7c7362;
+    --rule: #3a342a;
+    --rule-strong: #4d4534;
+    --red: #e0584a;
+    --red-ink: #f4a99c;
+    --red-soft: #3a211d;
+    --red-soft-rule: #5c332b;
+    --teal: #6cb8a9;
+    --teal-soft: #1e2e2a;
+    --teal-soft-rule: #33473f;
+    --amber: #d0973e;
+    --amber-soft: #332512;
+    --amber-soft-rule: #4f3a1c;
+    --code-bg: #221d16;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--teal); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:hover { color: var(--red); }
+  a:focus-visible, button:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--teal);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  h1, h2, h3, h4 {
+    font-family: "Fraunces", Georgia, serif;
+    font-weight: 620;
+    color: var(--ink);
+    text-wrap: balance;
+    line-height: 1.15;
+    margin: 0;
+  }
+
+  code, pre, .mono, .toc-num, .stat-value, table.reftable td:first-child, table.libtable td:first-child {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+  }
+
+  code {
+    background: var(--code-bg);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 0.05em 0.4em;
+    font-size: 0.88em;
+    color: var(--ink);
+  }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.76rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    margin: 0 0 0.6em 0;
+  }
+
+  /* ---------- Page grid ---------- */
+  .page {
+    display: grid;
+    grid-template-columns: 260px minmax(0, 1fr);
+    gap: 0;
+    max-width: 1180px;
+    margin: 0 auto;
+  }
+
+  nav.toc {
+    position: sticky;
+    top: 0;
+    align-self: start;
+    max-height: 100vh;
+    overflow-y: auto;
+    padding: 3.2rem 1.5rem 2rem 2rem;
+    border-right: 1px solid var(--rule);
+  }
+
+  nav.toc .toc-title {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin-bottom: 1rem;
+  }
+
+  nav.toc ol {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    counter-reset: toc;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  nav.toc li { counter-increment: toc; }
+
+  nav.toc a {
+    display: flex;
+    gap: 0.6em;
+    align-items: baseline;
+    padding: 0.4rem 0.5rem;
+    border-radius: 5px;
+    color: var(--ink-muted);
+    text-decoration: none;
+    font-size: 0.9rem;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+
+  nav.toc a .toc-num {
+    color: var(--ink-faint);
+    font-size: 0.76rem;
+    flex-shrink: 0;
+  }
+
+  nav.toc a:hover { background: var(--paper-raised); color: var(--ink); }
+
+  nav.toc a.active {
+    background: var(--teal-soft);
+    color: var(--teal);
+    font-weight: 500;
+  }
+  nav.toc a.active .toc-num { color: var(--teal); }
+
+  main {
+    padding: 3.2rem 2.2rem 6rem 2.4rem;
+    min-width: 0;
+  }
+
+  .content-measure { max-width: 66ch; }
+
+  /* ---------- Title block ---------- */
+  .title-block { max-width: 62ch; margin-bottom: 3.6rem; }
+  .title-block h1 {
+    font-size: clamp(2.1rem, 3.4vw, 2.9rem);
+    margin-bottom: 0.5rem;
+  }
+  .title-block .lede {
+    font-size: 1.15rem;
+    color: var(--ink-muted);
+    margin-top: 0.9rem;
+    max-width: 58ch;
+  }
+
+  .stat-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 2rem 0 0 0;
+  }
+  .stat-strip > div {
+    background: var(--paper-raised);
+    padding: 0.9rem 1rem;
+  }
+  .stat-strip dt {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    margin: 0 0 0.3em 0;
+  }
+  .stat-strip dd {
+    margin: 0;
+    font-family: "IBM Plex Mono", monospace;
+    font-weight: 500;
+    font-size: 1.02rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---------- Sections ---------- */
+  section {
+    padding-top: 3.6rem;
+    margin-top: 3.6rem;
+    border-top: 1px solid var(--rule);
+    scroll-margin-top: 1.5rem;
+  }
+  section:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
+
+  .section-head { display: flex; align-items: baseline; gap: 0.8rem; margin-bottom: 1.2rem; }
+  .section-num {
+    font-family: "IBM Plex Mono", monospace;
+    color: var(--ink-faint);
+    font-size: 1rem;
+  }
+  section h2 { font-size: 1.7rem; }
+  section h3 { font-size: 1.18rem; margin-top: 2rem; margin-bottom: 0.7rem; color: var(--ink); }
+
+  p { max-width: 66ch; margin: 0 0 1.05em 0; }
+  ul, ol { max-width: 64ch; padding-left: 1.3em; }
+  li { margin-bottom: 0.45em; }
+  p:last-child, ul:last-child, ol:last-child { margin-bottom: 0; }
+
+  strong { font-weight: 600; }
+
+  .callout {
+    max-width: 64ch;
+    border-left: 3px solid var(--teal);
+    background: var(--teal-soft);
+    border-radius: 0 8px 8px 0;
+    padding: 0.9rem 1.2rem;
+    margin: 1.4rem 0;
+  }
+  .callout.amber { border-color: var(--amber); background: var(--amber-soft); }
+  .callout.red { border-color: var(--red); background: var(--red-soft); }
+  .callout p { margin: 0; font-size: 0.95rem; }
+  .callout p + p { margin-top: 0.6em; }
+
+  /* ---------- Figures / diagrams ---------- */
+  figure {
+    margin: 2.2rem 0;
+    max-width: 100%;
+  }
+  figure.full-bleed { max-width: none; }
+  figure .fig-frame {
+    background: var(--paper-raised);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    padding: 1.4rem;
+    overflow-x: auto;
+    box-shadow: var(--shadow);
+  }
+  figure svg { display: block; max-width: 100%; height: auto; }
+  figcaption {
+    margin-top: 0.7rem;
+    font-size: 0.86rem;
+    color: var(--ink-muted);
+    max-width: 62ch;
+  }
+  figcaption .fig-label {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    display: block;
+    margin-bottom: 0.25em;
+  }
+
+  pre.mermaid {
+    background: var(--paper-raised);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    padding: 1.2rem;
+    box-shadow: var(--shadow);
+    overflow-x: auto;
+  }
+
+  /* ---------- Tables ---------- */
+  .table-wrap { overflow-x: auto; margin: 1.4rem 0; max-width: 100%; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 480px;
+    font-size: 0.92rem;
+  }
+  table.reftable, table.libtable { min-width: 620px; }
+  th, td {
+    text-align: left;
+    padding: 0.55rem 0.9rem;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  th {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    font-weight: 500;
+    border-bottom: 1px solid var(--rule-strong);
+  }
+  tr:last-child td { border-bottom: none; }
+  td:first-child { white-space: nowrap; color: var(--ink); }
+  .tag {
+    display: inline-block;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.7rem;
+    padding: 0.12em 0.55em;
+    border-radius: 999px;
+    background: var(--teal-soft);
+    color: var(--teal);
+    border: 1px solid var(--teal-soft-rule);
+    white-space: nowrap;
+  }
+
+  /* ---------- Panel mock swatches ---------- */
+  .swatch-row { display: flex; gap: 1.4rem; flex-wrap: wrap; margin: 1.2rem 0 0.4rem; }
+  .swatch { display: flex; align-items: center; gap: 0.55rem; font-size: 0.86rem; color: var(--ink-muted); }
+  .swatch i {
+    display: inline-block; width: 14px; height: 14px; border-radius: 3px;
+    border: 1px solid var(--rule-strong);
+  }
+
+  footer {
+    max-width: 66ch;
+    margin-top: 4.5rem;
+    padding-top: 2rem;
+    border-top: 1px solid var(--rule);
+    color: var(--ink-muted);
+    font-size: 0.88rem;
+  }
+  footer a { color: var(--ink-muted); }
+  footer a:hover { color: var(--red); }
+
+  @media (max-width: 900px) {
+    .page { grid-template-columns: 1fr; }
+    nav.toc {
+      position: static;
+      max-height: none;
+      border-right: none;
+      border-bottom: 1px solid var(--rule);
+      padding: 1.6rem 1.4rem;
+    }
+    nav.toc ol { flex-direction: row; flex-wrap: wrap; gap: 0.3rem 0.6rem; }
+    nav.toc a { padding: 0.3rem 0.55rem; font-size: 0.82rem; }
+    main { padding: 2.2rem 1.3rem 4rem; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <nav class="toc" aria-label="Table of contents">
+    <div class="toc-title">Contents</div>
+    <ol id="toc-list">
+      <li><a href="#overview"><span class="toc-num">00</span>Overview</a></li>
+      <li><a href="#architecture"><span class="toc-num">01</span>System architecture</a></li>
+      <li><a href="#proxy"><span class="toc-num">02</span>Why a local proxy</a></li>
+      <li><a href="#cycle"><span class="toc-num">03</span>Device operating cycle</a></li>
+      <li><a href="#setup"><span class="toc-num">04</span>First-time setup</a></li>
+      <li><a href="#alarms"><span class="toc-num">05</span>Alarm decision logic</a></li>
+      <li><a href="#layout"><span class="toc-num">06</span>Display layout</a></li>
+      <li><a href="#code"><span class="toc-num">07</span>Python code reference</a></li>
+      <li><a href="#tradeoffs"><span class="toc-num">08</span>Design tradeoffs</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <header class="title-block">
+      <p class="eyebrow">System reference &middot; Inkplate Minimed Monitor</p>
+      <h1>How a glucose reading reaches a strip of e-paper</h1>
+      <p class="lede">A continuous glucose sensor, an insulin pump, a reverse-engineered cloud client, a self-hosted proxy, and a 2.13&Prime; three-colour display that sleeps for five minutes at a time. This is the whole path, one hop at a time, followed by a full reference to the code that runs on the display itself.</p>
+      <dl class="stat-strip">
+        <div><dt>Panel</dt><dd>212&times;104px, 3-colour</dd></div>
+        <div><dt>Wake interval</dt><dd>~300s</dd></div>
+        <div><dt>Awake per cycle</dt><dd>~20&ndash;45s</dd></div>
+        <div><dt>Deep-sleep draw</dt><dd>~8&micro;A</dd></div>
+      </dl>
+    </header>
+
+    <!-- 00 OVERVIEW -->
+    <section id="overview">
+      <div class="section-head"><span class="section-num">00</span><h2>Overview</h2></div>
+      <p>The device on the caregiver's shelf shows one number, one trend arrow, and a line of insulin &mdash; but getting that number there means crossing three separate systems that were never designed to talk to a two-inch e-paper display. The pump computes a glucose reading from its sensor, ships it to Medtronic's cloud, a locally-run proxy pulls it back down onto the home network, and once every five minutes an ESP32 wakes up just long enough to ask for it.</p>
+      <p>Nothing about this is real-time. The pump's own sensor only produces a new reading every five minutes; the display is built around that fact rather than fighting it, spending most of its life in deep sleep and refreshing only as often as there's genuinely new data to show.</p>
+      <div class="callout">
+        <p><strong>Three frontends, one data source.</strong> This document describes the Inkplate 2 e-paper frontend specifically &mdash; the code examples and diagrams below are all drawn from its actual <code>main.py</code>. A desktop (Tkinter) and an M5Stack Fire frontend exist as siblings, polling the same proxy but with entirely separate, non-shared code.</p>
+      </div>
+    </section>
+
+    <!-- 01 ARCHITECTURE -->
+    <section id="architecture">
+      <div class="section-head"><span class="section-num">01</span><h2>System architecture</h2></div>
+      <p>Five hops separate the sensor under the patient's skin from the display on the wall. Each one exists for a reason &mdash; mostly because the systems on either side of it were built by different people, for different purposes, a decade apart.</p>
+
+      <figure class="full-bleed">
+        <div class="fig-frame">
+          <svg viewBox="0 0 1180 400" role="img" aria-label="Data flow diagram: pump and CGM sensor pair with the patient's phone, which uploads to Medtronic Carelink Cloud; a self-hosted Carelink proxy polls that cloud API and re-exposes it as a plain local REST endpoint; the Inkplate device polls the proxy every five minutes over WiFi and redraws its e-paper panel; a caregiver reads the display.">
+            <defs>
+              <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M0,0 L10,5 L0,10 z" fill="currentColor"></path>
+              </marker>
+            </defs>
+
+            <!-- baseline -->
+            <line x1="40" y1="150" x2="1140" y2="150" stroke="currentColor" stroke-opacity="0.15" stroke-width="1"></line>
+
+            <!-- Stage 1: Pump + CGM -->
+            <rect x="30" y="105" width="180" height="90" rx="8" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+            <text x="120" y="138" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">Minimed pump</text>
+            <text x="120" y="158" text-anchor="middle" font-size="12" fill="currentColor" opacity="0.75">+ Guardian CGM sensor</text>
+            <text x="120" y="176" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.55">glucose, insulin, alarms</text>
+
+            <line x1="210" y1="150" x2="262" y2="150" stroke="currentColor" stroke-width="1.4" marker-end="url(#arrow)"></line>
+            <text x="236" y="130" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.7">Bluetooth</text>
+            <text x="236" y="177" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.55">pairing</text>
+
+            <!-- Stage 2: Phone app -->
+            <rect x="270" y="105" width="150" height="90" rx="8" fill="none" stroke="currentColor" stroke-width="1.4"></rect>
+            <text x="345" y="145" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">Patient's phone</text>
+            <text x="345" y="165" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.55">CareLink Connect app</text>
+
+            <line x1="420" y1="150" x2="472" y2="150" stroke="currentColor" stroke-width="1.4" marker-end="url(#arrow)"></line>
+            <text x="446" y="130" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.7">cellular / WiFi</text>
+            <text x="446" y="177" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.55">periodic upload</text>
+
+            <!-- Stage 3: Carelink Cloud -->
+            <rect x="480" y="95" width="180" height="110" rx="8" fill="var(--teal-soft)" stroke="var(--teal)" stroke-width="1.6"></rect>
+            <text x="570" y="138" text-anchor="middle" font-size="14" font-weight="600" fill="var(--teal)">Medtronic</text>
+            <text x="570" y="156" text-anchor="middle" font-size="14" font-weight="600" fill="var(--teal)">Carelink Cloud</text>
+            <text x="570" y="178" text-anchor="middle" font-size="10.5" fill="var(--teal)" opacity="0.8">OAuth + reCAPTCHA</text>
+            <text x="570" y="192" text-anchor="middle" font-size="10.5" fill="var(--teal)" opacity="0.8">see &sect;02</text>
+
+            <line x1="660" y1="150" x2="712" y2="150" stroke="var(--teal)" stroke-width="1.6" marker-end="url(#arrow)"></line>
+            <text x="686" y="130" text-anchor="middle" font-size="10.5" fill="var(--teal)">REST poll</text>
+            <text x="686" y="177" text-anchor="middle" font-size="10.5" fill="var(--teal)" opacity="0.8">token-authenticated</text>
+
+            <!-- Stage 4: Carelink Proxy -->
+            <rect x="720" y="95" width="190" height="110" rx="8" fill="var(--amber-soft)" stroke="var(--amber)" stroke-width="1.6"></rect>
+            <text x="815" y="132" text-anchor="middle" font-size="14" font-weight="600" fill="var(--amber)">Carelink proxy</text>
+            <text x="815" y="152" text-anchor="middle" font-size="11" fill="var(--amber)" opacity="0.85">self-hosted on the LAN</text>
+            <text x="815" y="170" text-anchor="middle" font-size="10.5" fill="var(--amber)" opacity="0.85">caches the latest status</text>
+            <text x="815" y="188" text-anchor="middle" font-size="10.5" font-family="IBM Plex Mono, monospace" fill="var(--amber)">/carelink/nohistory</text>
+
+            <line x1="910" y1="150" x2="962" y2="150" stroke="currentColor" stroke-width="1.6" marker-end="url(#arrow)"></line>
+            <text x="936" y="130" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.7">plain HTTP GET</text>
+            <text x="936" y="177" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.55">every ~300s</text>
+
+            <!-- Stage 5: Inkplate device -->
+            <rect x="970" y="85" width="185" height="130" rx="8" fill="var(--red-soft)" stroke="var(--red)" stroke-width="1.8"></rect>
+            <text x="1062" y="122" text-anchor="middle" font-size="14" font-weight="600" fill="var(--red-ink)">Inkplate 2</text>
+            <text x="1062" y="141" text-anchor="middle" font-size="11" fill="var(--red-ink)" opacity="0.85">ESP32 + e-paper</text>
+            <text x="1062" y="159" text-anchor="middle" font-size="10.5" fill="var(--red-ink)" opacity="0.85">wake &rarr; fetch &rarr;</text>
+            <text x="1062" y="175" text-anchor="middle" font-size="10.5" fill="var(--red-ink)" opacity="0.85">redraw &rarr; sleep</text>
+            <text x="1062" y="197" text-anchor="middle" font-size="10.5" font-family="IBM Plex Mono, monospace" fill="var(--red-ink)">&sect;03</text>
+
+            <!-- caregiver -->
+            <line x1="1062" y1="215" x2="1062" y2="260" stroke="currentColor" stroke-width="1.4" marker-end="url(#arrow)"></line>
+            <text x="1062" y="285" text-anchor="middle" font-size="13" font-weight="500" fill="currentColor">Caregiver glances</text>
+            <text x="1062" y="303" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.6">at the panel, any time</text>
+
+            <!-- bottom note on token bootstrap -->
+            <line x1="570" y1="205" x2="570" y2="255" stroke="var(--teal)" stroke-width="1.2" stroke-dasharray="3 3"></line>
+            <rect x="450" y="257" width="240" height="60" rx="6" fill="none" stroke="var(--teal)" stroke-width="1.2" stroke-dasharray="3 3"></rect>
+            <text x="570" y="278" text-anchor="middle" font-size="11" fill="var(--teal)">A PC + browser bootstraps</text>
+            <text x="570" y="294" text-anchor="middle" font-size="11" fill="var(--teal)">the login session by hand,</text>
+            <text x="570" y="310" text-anchor="middle" font-size="11" fill="var(--teal)">periodically &mdash; see &sect;02</text>
+          </svg>
+        </div>
+        <figcaption><span class="fig-label">Figure 1 &middot; end-to-end data flow</span>Five hops from sensor to screen. The two coloured stages &mdash; Carelink Cloud and the Carelink proxy &mdash; are the ones this project's own code touches directly; everything to their left is Medtronic's system, unmodified.</figcaption>
+      </figure>
+
+      <h3>The hops, in short</h3>
+      <ul>
+        <li><strong>Pump + CGM sensor.</strong> The 770G/780G pump reads glucose from a paired Guardian sensor/transmitter roughly every five minutes, runs its own SmartGuard auto-mode logic, delivers insulin, and raises its own alarms (low/high glucose, reservoir, battery, sensor issues) entirely on-device.</li>
+        <li><strong>Patient's phone.</strong> Medtronic's CareLink Connect app pairs with the pump over Bluetooth and periodically uploads its state to Medtronic's own cloud &mdash; this hop is entirely Medtronic's software, outside this project.</li>
+        <li><strong>Carelink Cloud.</strong> Medtronic's server holds the current pump/sensor state behind an authenticated REST API not intended for third-party use &mdash; see &sect;02 for what that authentication actually involves.</li>
+        <li><strong>Carelink proxy.</strong> A separately-hosted instance of the <a href="https://github.com/ondrej1024/carelink-python-client" target="_blank" rel="noopener">Carelink Python Client</a>'s proxy, run continuously on the caregiver's own network. It holds the cloud session, refreshes it, and re-exposes the latest status as a trivial local REST endpoint any embedded device can call with a plain HTTP GET.</li>
+        <li><strong>Inkplate device.</strong> Wakes on a timer, polls the proxy, decides what (if anything) needs an alarm, and redraws its panel &mdash; the subject of the rest of this document.</li>
+      </ul>
+    </section>
+
+    <!-- 02 WHY A PROXY -->
+    <section id="proxy">
+      <div class="section-head"><span class="section-num">02</span><h2>Why a local proxy</h2></div>
+      <p>The obvious simplification would be to drop the proxy and have the Inkplate talk to Carelink Cloud directly. That was investigated and ruled out &mdash; not because of the ongoing polling, but because of what it takes to <em>start</em> a session.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Step</th><th>What it requires</th><th>Why an ESP32 can't do it</th></tr></thead>
+          <tbody>
+            <tr><td>OAuth / social login</td><td>A real browser driving Medtronic's login flow</td><td>No browser exists on this firmware</td></tr>
+            <tr><td>reCAPTCHA</td><td>A human, solving it</td><td>Not automatable, by design</td></tr>
+            <tr><td>Device registration</td><td>A 2048-bit RSA keypair + X.509 CSR</td><td>No CSR/X.509 tooling on-device</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Every one of those steps happens on a PC, using a real browser (Selenium-driven Firefox), producing a session token. The <strong>proxy's</strong> whole job is to hold onto that token, refresh it, keep polling Carelink Cloud in the background, and expose the result as one unauthenticated, LAN-only endpoint &mdash; <code>GET /carelink/nohistory</code> &mdash; so that every embedded frontend downstream (this device included) never has to know OAuth, CAPTCHAs, or certificates exist.</p>
+      <div class="callout amber">
+        <p>The tradeoff this buys: an always-on machine on the home network to run the proxy, and a human at a PC every so often when the session needs re-bootstrapping. In exchange, the device itself stays as simple as a raw socket and a JSON parser.</p>
+      </div>
+    </section>
+
+    <!-- 03 DEVICE CYCLE -->
+    <section id="cycle">
+      <div class="section-head"><span class="section-num">03</span><h2>Device operating cycle</h2></div>
+      <p><code>main()</code> is not a loop &mdash; it's a single pass. <code>machine.deepsleep()</code> at the end re-runs the entire script from scratch on the next wake, so there is deliberately no state carried in memory between cycles.</p>
+
+      <figure>
+        <div class="fig-frame">
+<pre class="mermaid">
+flowchart TD
+    A["Deep-sleep wake\n(or power-on)"] --> B{"Cold boot?\n(reset_cause)"}
+    B -- yes --> C["Draw version splash\n~17s refresh"]
+    B -- no, normal wake --> D["Skip splash"]
+    C --> E["Read /minimed_config.json"]
+    D --> E
+    E --> F{"WiFi + proxy\nconfigured?"}
+    F -- no --> G["Start AP-mode\nsetup server -- see §04"]
+    G -.reboot once saved.-> A
+    F -- yes --> H["Connect WiFi\nup to 25s"]
+    H --> I{"Connected?"}
+    I -- no --> K["Skip fetch/draw\nthis cycle"]
+    I -- yes --> L["Sync NTP time"]
+    L --> M["Fetch + parse\nproxy data"]
+    M --> N["Decide alarm state\nsee §05"]
+    N --> O["Redraw panel\n~17-23s"]
+    K --> P["machine.deepsleep\n~300s"]
+    O --> P
+    P -.wakes into.-> A
+</pre>
+        </div>
+        <figcaption><span class="fig-label">Figure 2 &middot; one wake cycle</span>Every box after "Read config" runs inside a single broad <code>try/except</code> (see &sect;08) &mdash; any unhandled error anywhere in that block falls straight through to deep sleep rather than crashing to an idle prompt, so a bug costs one missed update, never a stuck device.</figcaption>
+      </figure>
+
+      <h3>Why the radio timeout is generous</h3>
+      <p>Unlike a continuously-powered device that associates with WiFi once and stays connected, this board's radio is fully powered down every cycle by <code>machine.deepsleep()</code> and has to cold-reassociate from nothing, every ~5 minutes. A connect failure here does <strong>not</strong> fall through to the setup flow in &sect;04 &mdash; that's reserved for a config file that's missing credentials outright. A transient failure on an already-configured device just skips this cycle and tries again next wake.</p>
+    </section>
+
+    <!-- 04 SETUP -->
+    <section id="setup">
+      <div class="section-head"><span class="section-num">04</span><h2>First-time setup</h2></div>
+      <p>The first time the device boots &mdash; or any time it can't find stored WiFi credentials &mdash; it stops trying to be a display and becomes a tiny access point instead.</p>
+
+      <figure>
+        <div class="fig-frame">
+<pre class="mermaid">
+sequenceDiagram
+    participant D as Inkplate device
+    participant P as Caregiver's phone
+
+    D->>D: No stored WiFi credentials
+    D->>D: Start AP "INKPLATE_MINIMED_MON"
+    D->>D: Draw "connect to WiFi" message
+    P->>D: Join the access point
+    D->>D: Draw "load 192.168.4.1" message
+    P->>D: GET 192.168.4.1
+    D-->>P: Config form (SSID, password,\nNTP server, timezone, proxy address)
+    P->>D: Submit form
+    D->>D: Validate all fields present
+    D-->>P: "Saved, resetting..." page
+    D->>D: Write /minimed_config.json
+    D->>D: machine.reset()
+    D->>D: Reboot, join real WiFi,\nresume §03
+</pre>
+        </div>
+        <figcaption><span class="fig-label">Figure 3 &middot; access-point setup</span>The config server (<code>do_access_point()</code>) is a hand-rolled HTTP server over a raw socket &mdash; the same reason this firmware has no <code>requests</code> module also means it has no web framework, so this is ~150 lines of manual request parsing.</figcaption>
+      </figure>
+    </section>
+
+    <!-- 05 ALARMS -->
+    <section id="alarms">
+      <div class="section-head"><span class="section-num">05</span><h2>Alarm decision logic</h2></div>
+      <p>The proxy's <code>lastAlarm</code> field reports the most recent alarm <em>notification</em> &mdash; it does not update or clear itself just because the underlying glucose reading has since recovered. Deciding whether to actually show a red banner takes two independent checks.</p>
+
+      <figure>
+        <div class="fig-frame">
+<pre class="mermaid">
+flowchart TD
+    A["lastAlarm from proxy"] --> B{"dateTime within\nALARM_RECENCY_S (15min)\nof true UTC now?"}
+    B -- no --> Z["No alarm shown"]
+    B -- yes --> C{"Fault ID is a\nlow/high glucose\nthreshold alarm?"}
+    C -- no --> D["Show banner\n+ its own timestamp"]
+    C -- yes, low --> E{"Current glucose\n&gt; hypo threshold?"}
+    E -- yes, recovered --> Z
+    E -- no, still low --> D
+    C -- yes, high --> F{"Current glucose\n&lt; hyper threshold?"}
+    F -- yes, recovered --> Z
+    F -- no, still high --> D
+</pre>
+        </div>
+        <figcaption><span class="fig-label">Figure 4 &middot; <code>get_alarm_text()</code></span>The recency check alone used to be unreliable: <code>lastAlarm.dateTime</code>'s digits turn out to already be local wall-clock time, unlike the proxy's other timestamp field &mdash; comparing it directly against true UTC silently stretched the effective window from 15 minutes to roughly two hours. The second check (against the live reading) is what actually catches an alarm clearing early.</figcaption>
+      </figure>
+
+      <p>Both checks matter independently: without the recency check, a week-old low would still show if the current reading happened to be low again for an unrelated reason. Without the value check, a genuinely-resolved low would keep showing for the rest of its 15-minute window.</p>
+    </section>
+
+    <!-- 06 LAYOUT -->
+    <section id="layout">
+      <div class="section-head"><span class="section-num">06</span><h2>Display layout</h2></div>
+      <p>The panel is 212&times;104 pixels in three colours, with no partial-refresh capability &mdash; every cycle clears and redraws the whole thing in one <code>display()</code> call. <code>draw_screen()</code> lays out five regions, all computed relative to the glucose number's own height so nothing has to be hand-tuned twice.</p>
+
+      <div class="swatch-row">
+        <span class="swatch"><i style="background:#ffffff;border-color:#8a7f68;"></i>white &mdash; ground</span>
+        <span class="swatch"><i style="background:#1a1a1a;"></i>black &mdash; text, trend, insulin</span>
+        <span class="swatch"><i style="background:#b8382a;"></i>red &mdash; out-of-range value, alarm banner</span>
+      </div>
+
+      <figure>
+        <div class="fig-frame">
+          <svg viewBox="0 0 636 312" role="img" aria-label="Annotated mock of the 212 by 104 pixel Inkplate panel, scaled 3x: a large glucose number and trend/unit/insulin column occupy the top 64 pixels, an always-shown update timestamp occupies the next row, and a red alarm banner occupies the bottom row when active.">
+            <!-- panel outline, 3x scale of 212x104 -->
+            <rect x="0" y="0" width="636" height="312" fill="#ffffff" stroke="#8a7f68" stroke-width="2"></rect>
+
+            <!-- glucose block guide -->
+            <rect x="6" y="6" width="624" height="192" fill="none" stroke="#8a7f68" stroke-width="1" stroke-dasharray="4 4"></rect>
+
+            <!-- glucose number -->
+            <text x="16" y="150" font-size="150" font-weight="700" font-family="IBM Plex Mono, monospace" fill="#1a1a1a">128</text>
+
+            <!-- right column -->
+            <text x="330" y="60" font-size="60" font-weight="600" font-family="IBM Plex Mono, monospace" fill="#1a1a1a">&#8593;</text>
+            <text x="330" y="140" font-size="42" font-family="IBM Plex Sans, sans-serif" fill="#1a1a1a">mg/dL</text>
+            <text x="330" y="185" font-size="38" font-family="IBM Plex Sans, sans-serif" fill="#1a1a1a">1.8 U (act. insulin)</text>
+
+            <!-- row A: updated -->
+            <rect x="6" y="204" width="624" height="48" fill="#f5f0e4"></rect>
+            <text x="16" y="236" font-size="34" font-family="IBM Plex Sans, sans-serif" fill="#1a1a1a">Updated 4 min ago (09:55)</text>
+
+            <!-- row B: alarm -->
+            <rect x="6" y="258" width="624" height="48" fill="#b8382a"></rect>
+            <text x="16" y="290" font-size="34" font-family="IBM Plex Sans, sans-serif" fill="#ffffff">Low Sensor Glucose (09:51)</text>
+
+            <!-- annotations -->
+            <text x="6" y="-8" font-size="1"></text>
+            <line x1="636" y1="0" x2="670" y2="0" stroke="currentColor" stroke-width="1" opacity="0.5"></line>
+          </svg>
+        </div>
+        <figcaption><span class="fig-label">Figure 5 &middot; panel regions, 3&times; scale</span>Top-to-bottom: the glucose figure (<code>gh = FONT_HEIGHT_1X &times; GLUCOSE_SIZE</code>, 64px), a right-hand column packed tightly enough that trend + unit + insulin exactly fill that same 64px, then two dedicated bottom rows &mdash; the update timestamp always drawn, the alarm banner drawn only when &sect;05 returns one. The two bottom rows used to share a single row; an active alarm used to hide the timestamp entirely.</figcaption>
+      </figure>
+    </section>
+
+    <!-- 07 CODE REFERENCE -->
+    <section id="code">
+      <div class="section-head"><span class="section-num">07</span><h2>Python code reference</h2></div>
+      <p>Everything above describes behaviour; this section maps it to the ~1,230 lines of <code>main.py</code> that actually run on the device &mdash; MicroPython, not CPython, with no package manager and no standard library beyond what the firmware ships.</p>
+
+      <h3>Library calls</h3>
+      <p>Seven imports, all firmware-provided. Two of them replace libraries a normal Python environment would take for granted, because this firmware doesn't ship them.</p>
+      <div class="table-wrap">
+        <table class="libtable">
+          <thead><tr><th>Module</th><th>Used for</th><th>Key calls</th></tr></thead>
+          <tbody>
+            <tr><td>inkplate2</td><td>The e-paper display driver itself</td><td><code>Inkplate()</code>, <code>.begin()</code>, <code>.clear_display()</code>, <code>.set_cursor()</code>, <code>.set_text_size()</code>/<code>.set_text_color()</code>, <code>.print()</code>/<code>.println()</code>, <code>.fill_rect()</code>, <code>.display()</code>, <code>.BLACK</code>/<code>.WHITE</code>/<code>.RED</code>, <code>.font_family.get_ch()</code></td></tr>
+            <tr><td>ntptime</td><td>Setting the RTC from a network time server</td><td><code>ntptime.host</code>, <code>ntptime.settime()</code></td></tr>
+            <tr><td>time</td><td>Epochs, wall clocks, elapsed-time timers</td><td><code>time()</code>, <code>localtime()</code>, <code>mktime()</code>, <code>ticks_ms()</code>/<code>ticks_diff()</code>/<code>ticks_add()</code>, <code>sleep_ms()</code></td></tr>
+            <tr><td>json</td><td>Parsing the proxy's response; reading/writing config</td><td><code>loads()</code>, <code>dump()</code>/<code>load()</code></td></tr>
+            <tr><td>network</td><td>Both WiFi roles this device plays</td><td><code>WLAN(STA_IF)</code> &mdash; client, joins the real network; <code>WLAN(AP_IF)</code> &mdash; the &sect;04 setup access point</td></tr>
+            <tr><td>socket</td><td><span class="tag">no requests module</span> Raw TCP, in both directions</td><td>Outbound: hand-rolled HTTP/1.0 GET to the proxy. Inbound: the &sect;04 config server's own tiny listener</td></tr>
+            <tr><td>machine</td><td>Power state and hardware reset info</td><td><code>deepsleep()</code>, <code>reset_cause()</code>, <code>DEEPSLEEP_RESET</code>, <code>RTC()</code> (one byte, for the ghosting workaround &mdash; &sect;08), <code>reset()</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Function reference</h3>
+      <p>Grouped by the file's own section order, each mapped back to where it fits in Figure 2's cycle.</p>
+      <div class="table-wrap">
+        <table class="reftable">
+          <thead><tr><th>Function</th><th>Purpose</th><th>Cycle stage</th></tr></thead>
+          <tbody>
+            <tr><td>config_write() / config_read()</td><td>Persist and load <code>/minimed_config.json</code></td><td>Read config</td></tr>
+            <tr><td>ntp_sync()</td><td>Set the RTC to UTC from the configured NTP server</td><td>Sync NTP</td></tr>
+            <tr><td>local_now()</td><td>Apply timezone + DST offset to the current UTC clock</td><td>Redraw panel</td></tr>
+            <tr><td>http_get()</td><td>Raw-socket HTTP/1.0 GET, returns (status, body)</td><td>Fetch + parse</td></tr>
+            <tr><td>web_page_config() / web_page_success()</td><td>The two HTML pages the &sect;04 config server serves</td><td>AP-mode setup</td></tr>
+            <tr><td>get_url_param()</td><td>Pull one field out of a raw querystring</td><td>AP-mode setup</td></tr>
+            <tr><td>do_ap_status()</td><td>Draw a plain status message during setup (no sound &mdash; no speaker)</td><td>AP-mode setup</td></tr>
+            <tr><td>do_access_point()</td><td>Run the AP + listen loop end-to-end (Figure 3)</td><td>AP-mode setup</td></tr>
+            <tr><td>read_config()</td><td>Load config, falling through to AP mode if credentials are missing</td><td>Read config</td></tr>
+            <tr><td>wlan_connect()</td><td>Join WiFi with a 25s budget; never raises into the caller</td><td>Connect WiFi</td></tr>
+            <tr><td>time_delta()</td><td>"X min ago" / "No data" / "Now" phrasing between two timestamps</td><td>Redraw panel</td></tr>
+            <tr><td>convert_datetimestr_to_epoch()</td><td>Parse a Carelink ISO-ish datetime string to an epoch value</td><td>Decide alarm state</td></tr>
+            <tr><td>getFaultStr()</td><td>Fault ID &rarr; canonical ID &rarr; human-readable message</td><td>Decide alarm state</td></tr>
+            <tr><td>get_alarm_text()</td><td>The full decision in Figure 4</td><td>Decide alarm state</td></tr>
+            <tr><td>new_state()</td><td>The empty <code>state</code> dict shape every cycle fills in</td><td>Fetch + parse</td></tr>
+            <tr><td>handle_pumpdataupdate()</td><td>Fetch, parse, and populate <code>state</code> from the proxy's JSON</td><td>Fetch + parse</td></tr>
+            <tr><td>_had_banner_last_cycle() / _set_banner_flag()</td><td>One-byte RTC-memory flag for the ghosting workaround</td><td>Redraw panel</td></tr>
+            <tr><td>text_width() / wrap_text_to_width() / truncate_to_width()</td><td>Measure and fit text against this font's real (non-monospace) glyph widths</td><td>Redraw panel</td></tr>
+            <tr><td>draw_screen()</td><td>Lays out Figure 5 and calls <code>display()</code></td><td>Redraw panel</td></tr>
+            <tr><td>main()</td><td>Orchestrates Figure 2, start to finish</td><td>&mdash;</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 08 TRADEOFFS -->
+    <section id="tradeoffs">
+      <div class="section-head"><span class="section-num">08</span><h2>Design tradeoffs</h2></div>
+      <p>None of these are oversights &mdash; each was a deliberate choice, made once the hardware's actual constraints were understood on real devices rather than in the datasheet.</p>
+      <ul>
+        <li><strong>Alarms are visual-only.</strong> This board has no speaker. A caregiver not looking at the panel gets no alert at all &mdash; a materially weaker guarantee than an audible alarm, accepted for this device rather than solved.</li>
+        <li><strong>Every redraw is a full flash, not a partial update.</strong> No partial-refresh API exists for this panel, so even a one-digit change repaints all 212&times;104 pixels, visibly, for 17&ndash;23 seconds.</li>
+        <li><strong>Red ink ghosts.</strong> The red plane doesn't fully settle on a single refresh after a large red area (the alarm banner) &mdash; clearing it needs one extra blank flash, tracked via a single byte of RTC memory since nothing else survives a deep-sleep restart.</li>
+        <li><strong>No cross-cycle memory, on purpose.</strong> Because <code>main()</code> keeps no state, an unhandled exception anywhere in the cycle costs exactly one missed update and self-heals on the next wake &mdash; there is no dedup bookkeeping left to corrupt, no flag left stale.</li>
+        <li><strong>No factory-reset gesture yet.</strong> A stuck bad config currently has to be cleared by hand over a serial connection; a power-cycle-counting gesture is designed but not yet wired up.</li>
+      </ul>
+    </section>
+
+    <footer>
+      <p>Inkplate Minimed Monitor &middot; <a href="https://github.com/fredvangoolen/inkplate-minimed-monitor" target="_blank" rel="noopener">source on GitHub</a> &middot; GPLv3, building on Ondrej Wisniewski's original M5 Minimed Monitor.</p>
+    </footer>
+  </main>
+</div>
+
+<script>
+(function () {
+  var links = Array.prototype.slice.call(document.querySelectorAll('#toc-list a'));
+  var sections = links.map(function (a) {
+    return document.getElementById(a.getAttribute('href').slice(1));
+  });
+
+  if (!('IntersectionObserver' in window)) return;
+
+  var observer = new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
+      var idx = sections.indexOf(entry.target);
+      if (idx === -1) return;
+      if (entry.isIntersecting) {
+        links.forEach(function (l) { l.classList.remove('active'); });
+        links[idx].classList.add('active');
+      }
+    });
+  }, { rootMargin: '-10% 0px -70% 0px', threshold: 0 });
+
+  sections.forEach(function (s) { if (s) observer.observe(s); });
+})();
+</script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+</script>
+</body>
+</html>
