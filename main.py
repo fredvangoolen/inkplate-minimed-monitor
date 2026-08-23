@@ -75,6 +75,10 @@
 #
 #  Copyright 2021-2026, Ondrej Wisniewski and contributors
 #
+#  Modified 2026 to target the Soldered Inkplate 2 platform: the GUI,
+#  timing, and alarm-handling logic were redesigned for this board's
+#  e-paper display and deep-sleep power model (see "Credits" above).
+#
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
 #  the Free Software Foundation, either version 3 of the License, or
