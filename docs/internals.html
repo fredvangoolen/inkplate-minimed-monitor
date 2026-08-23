@@ -682,6 +682,12 @@ flowchart TD
       </figure>
 
       <p>Both checks matter independently: without the recency check, a week-old low would still show if the current reading happened to be low again for an unrelated reason. Without the value check, a genuinely-resolved low would keep showing for the rest of its 15-minute window.</p>
+
+      <h3>Two independent red signals</h3>
+      <p>The glucose figure turning red and the alarm banner appearing are <strong>not the same mechanism</strong>, and can disagree. The number's colour comes from a fixed threshold in this code (<code>HYPER_THRESHOLD_MGDL</code>/<code>HYPO_THRESHOLD_MGDL</code>, 180/70) applied to whatever the current reading is &mdash; nothing more. The banner only appears when Carelink itself reports a <code>lastAlarm</code> event, which fires against thresholds configured on the pump by the patient or clinician &mdash; values this proxy response doesn't expose, so this code has no way to know or replicate them.</p>
+      <div class="callout amber">
+        <p>A reading of 69 mg/dL showing red with <em>no</em> banner underneath is expected, not a bug: it crossed this display's own line without necessarily crossing the pump's own configured alarm line. The reverse is just as possible &mdash; an in-range reading can still carry an active banner, if the alarm is a non-glucose one (reservoir, battery, sensor) that Figure 4 never corroborates against the current value in the first place.</p>
+      </div>
     </section>
 
     <!-- 06 LAYOUT -->
