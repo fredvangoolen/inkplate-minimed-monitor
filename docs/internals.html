@@ -769,7 +769,7 @@
             <!-- right column -->
             <text x="330" y="60" font-size="60" font-weight="600" font-family="IBM Plex Mono, monospace" fill="#1a1a1a">&#8593;</text>
             <text x="330" y="140" font-size="42" font-family="IBM Plex Sans, sans-serif" fill="#1a1a1a">mg/dL</text>
-            <text x="330" y="185" font-size="38" font-family="IBM Plex Sans, sans-serif" fill="#1a1a1a">1.8 U (act. insulin)</text>
+            <text x="330" y="185" font-size="38" font-family="IBM Plex Sans, sans-serif" fill="#1a1a1a">1.8 U (act. insul)</text>
 
             <!-- row A: updated -->
             <rect x="6" y="204" width="624" height="48" fill="#f5f0e4"></rect>
@@ -805,7 +805,7 @@
             <tr><td>json</td><td>Parsing the proxy's response; reading/writing config</td><td><code>loads()</code>, <code>dump()</code>/<code>load()</code></td></tr>
             <tr><td>network</td><td>Both WiFi roles this device plays</td><td><code>WLAN(STA_IF)</code> &mdash; client, joins the real network; <code>WLAN(AP_IF)</code> &mdash; the &sect;04 setup access point</td></tr>
             <tr><td>socket</td><td><span class="tag">no requests module</span> Raw TCP, in both directions</td><td>Outbound: hand-rolled HTTP/1.0 GET to the proxy. Inbound: the &sect;04 config server's own tiny listener</td></tr>
-            <tr><td>machine</td><td>Power state and hardware reset info</td><td><code>deepsleep()</code>, <code>reset_cause()</code>, <code>DEEPSLEEP_RESET</code>, <code>RTC()</code> (one byte, for the ghosting workaround &mdash; &sect;08), <code>reset()</code></td></tr>
+            <tr><td>machine</td><td>Power state and hardware reset info</td><td><code>deepsleep()</code>, <code>reset_cause()</code>, <code>DEEPSLEEP_RESET</code>, <code>reset()</code></td></tr>
           </tbody>
         </table>
       </div>
@@ -832,7 +832,6 @@
             <tr><td>get_alarm_text()</td><td>The full decision in Figure 4</td><td>Decide alarm state</td></tr>
             <tr><td>new_state()</td><td>The empty <code>state</code> dict shape every cycle fills in</td><td>Fetch + parse</td></tr>
             <tr><td>handle_pumpdataupdate()</td><td>Fetch, parse, and populate <code>state</code> from the proxy's JSON</td><td>Fetch + parse</td></tr>
-            <tr><td>_had_banner_last_cycle() / _set_banner_flag()</td><td>One-byte RTC-memory flag for the ghosting workaround</td><td>Redraw panel</td></tr>
             <tr><td>text_width() / wrap_text_to_width() / truncate_to_width()</td><td>Measure and fit text against this font's real (non-monospace) glyph widths</td><td>Redraw panel</td></tr>
             <tr><td>draw_screen()</td><td>Lays out Figure 5 and calls <code>display()</code></td><td>Redraw panel</td></tr>
             <tr><td>main()</td><td>Orchestrates Figure 2, start to finish</td><td>&mdash;</td></tr>
@@ -848,7 +847,6 @@
       <ul>
         <li><strong>Alarms are visual-only.</strong> This board has no speaker. A caregiver not looking at the panel gets no alert at all &mdash; a materially weaker guarantee than an audible alarm, accepted for this device rather than solved.</li>
         <li><strong>Every redraw is a full flash, not a partial update.</strong> No partial-refresh API exists for this panel, so even a one-digit change repaints all 212&times;104 pixels, visibly, for 17&ndash;23 seconds.</li>
-        <li><strong>Red ink ghosts.</strong> The red plane doesn't fully settle on a single refresh after a large red area (the alarm banner) &mdash; clearing it needs one extra blank flash, tracked via a single byte of RTC memory since nothing else survives a deep-sleep restart.</li>
         <li><strong>No cross-cycle memory, on purpose.</strong> Because <code>main()</code> keeps no state, an unhandled exception anywhere in the cycle costs exactly one missed update and self-heals on the next wake &mdash; there is no dedup bookkeeping left to corrupt, no flag left stale.</li>
         <li><strong>No factory-reset gesture yet.</strong> A stuck bad config currently has to be cleared by hand over a serial connection; a power-cycle-counting gesture is designed but not yet wired up.</li>
       </ul>

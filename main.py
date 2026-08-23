@@ -72,14 +72,6 @@
 #         parsed into state but not rendered (see new_state()), dropped
 #         after on-device visual review found it cluttered; a future
 #         version could use pre-converted bitmap icons for it.
-#  * draw_screen()'s red-banner-ghosting workaround (one extra blank
-#         display() pass on the cycle after an alarm banner clears - see
-#         the comment above FONT_HEIGHT_1X) is a caregiver-reported-symptom
-#         fix, not yet confirmed sufficient on real hardware - if a single
-#         extra pass doesn't fully clear it, add more. It also claims one
-#         byte of RTC memory (see _rtc above) - any future use of RTC
-#         memory (e.g. the factory-reset boot counter above) needs to not
-#         collide with that byte.
 #
 #  Copyright 2021-2026, Ondrej Wisniewski and contributors
 #
@@ -946,43 +938,7 @@ def handle_pumpdataupdate(proxyaddr, proxyport, timezone):
 # earlier layout sketch were dropped per on-device visual feedback - this
 # is just the glucose figure, its unit/trend, and active insulin.
 #
-# Red-banner ghosting: this panel's red plane doesn't fully clear on a
-# single full-panel refresh when the previous frame had a large solid red
-# area (the alarm banner) - a caregiver reported the glucose number
-# updating fine while the red banner itself stayed on screen after the
-# alarm had aged out. This is the physical red e-ink pigment being slower
-# to migrate than black/white, not a framebuffer bug: clear_display()
-# already zeroes this driver's own framebuffer every cycle (see
-# handle_pumpdataupdate()/draw_screen() below), so what's lingering is
-# purely on the panel's glass. The fix is an extra blank (all-white)
-# display() pass to force a second physical flash, but only on the one
-# cycle where a banner just stopped being shown - every cycle would
-# double the ~17-23s awake time this design otherwise avoids. Since
-# main() carries no state across a deep-sleep restart by design, that
-# "was a banner shown last cycle" bit is stashed in RTC memory instead of
-# the config file (survives deep sleep, no flash wear, cleared to
-# "no banner" on a true cold boot - which is fine, there's nothing to
-# clear yet). Needs on-device confirmation that one extra pass is enough;
-# if ghosting persists, this is the place to add more passes.
-#
 #################################################
-
-_rtc = machine.RTC()
-
-
-def _had_banner_last_cycle():
-   try:
-      return _rtc.memory() == b"\x01"
-   except Exception:
-      return False
-
-
-def _set_banner_flag(has_banner):
-   try:
-      _rtc.memory(b"\x01" if has_banner else b"\x00")
-   except Exception:
-      pass
-
 
 FONT_HEIGHT_1X = 16  # gfx_standard_font_01, confirmed via get_ch() on real hw
 
@@ -1035,12 +991,6 @@ def draw_screen(inkplate, state):
 
    banner_text = state["alarm_text"] or state["banner"]
 
-   if not banner_text and _had_banner_last_cycle():
-      # See "Red-banner ghosting" comment above - force one extra blank
-      # flash to physically clear the outgoing red banner before drawing
-      # this cycle's real (non-banner) content into the same buffer below.
-      inkplate.display()
-
    BLACK = inkplate.BLACK
    WHITE = inkplate.WHITE
    RED   = inkplate.RED
@@ -1085,7 +1035,7 @@ def draw_screen(inkplate, state):
 
    insulin_label_y = mgdl_y + FONT_HEIGHT_1X
    inkplate.set_cursor(side_x, insulin_label_y)
-   insulin_txt = "%.1f U (act. insulin)" % state["active_insulin"] if state["active_insulin"] is not None else "-- U (act. insulin)"
+   insulin_txt = "%.1f U (act. insul)" % state["active_insulin"] if state["active_insulin"] is not None else "-- U (act. insul)"
    max_insulin_w = PANEL_W - side_x - 2
    inkplate.print(truncate_to_width(inkplate, insulin_txt, max_insulin_w, 1))
 
@@ -1138,7 +1088,6 @@ def draw_screen(inkplate, state):
       inkplate.print(truncate_to_width(inkplate, banner_text, max_w, 1) + suffix)
 
    inkplate.display()
-   _set_banner_flag(bool(banner_text))
 
 
 # current_timezone is a 1-element list so draw_screen can read the value set
