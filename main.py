@@ -72,6 +72,14 @@
 #         parsed into state but not rendered (see new_state()), dropped
 #         after on-device visual review found it cluttered; a future
 #         version could use pre-converted bitmap icons for it.
+#  * draw_screen()'s red-banner-ghosting workaround (one extra blank
+#         display() pass on the cycle after an alarm banner clears - see
+#         the comment above FONT_HEIGHT_1X) is a caregiver-reported-symptom
+#         fix, not yet confirmed sufficient on real hardware - if a single
+#         extra pass doesn't fully clear it, add more. It also claims one
+#         byte of RTC memory (see _rtc above) - any future use of RTC
+#         memory (e.g. the factory-reset boot counter above) needs to not
+#         collide with that byte.
 #
 #  Copyright 2021-2026, Ondrej Wisniewski and contributors
 #
@@ -114,10 +122,11 @@ API_URL     = "carelink/nohistory"
 AP_SSID     = "INKPLATE_MINIMED_MON"
 AP_ADDR     = "192.168.4.1"
 
-# Fixed local thresholds used only to color the glucose number red on
-# draw_screen() - there's no pump-configured per-reading threshold in the
-# Carelink proxy's response to read instead, and these don't feed any
-# alarm/decision logic beyond the existing get_alarm_text().
+# Fixed local thresholds - there's no pump-configured per-reading threshold
+# in the Carelink proxy's response to read instead. Used to color the
+# glucose number red on draw_screen(), and also by get_alarm_text() to
+# decide whether a low/high-glucose alarm notification still reflects the
+# current reading (see "Alarm handling" below).
 HYPER_THRESHOLD_MGDL = 180
 HYPO_THRESHOLD_MGDL  = 70
 
@@ -746,15 +755,67 @@ def getFaultStr(faultId):
 # straightforward here despite each wake re-running the whole script from
 # scratch - see main() below.
 #
+# The Carelink proxy's lastAlarm field reports the most recent alarm
+# NOTIFICATION, not whether the underlying condition is still true - it
+# does not update or clear itself just because glucose has since recovered.
+# Relying on ALARM_RECENCY_S alone (as an earlier version of this file did)
+# left a "Low Sensor Glucose" banner showing in red for up to 15 minutes
+# after glucose had already returned to a normal reading, confirmed on real
+# hardware. For the fault IDs below - all directly tied to a low/high
+# glucose *threshold*, unlike e.g. a reservoir or battery alarm which this
+# script has no independent way to verify - get_alarm_text() additionally
+# corroborates against the CURRENT reading and treats the notification as
+# stale (cleared) once glucose is back on the right side of the threshold,
+# even if still within the recency window.
+#
 #################################################
 
-def get_alarm_text(lastAlarm):
+LOW_GLUCOSE_FAULT_IDS  = {"802", "805", "809", "810", "814", "815", "827"}
+HIGH_GLUCOSE_FAULT_IDS = {"816", "817", "823"}
+
+
+def get_alarm_text(lastAlarm, timezone, dst_delta, current_sg):
+   # Returns (message, local_tm) for a still-recent AND still-current alarm,
+   # else (None, None). local_tm is the alarm's OWN occurrence time (not
+   # "now"), so draw_screen() can show caregivers when it actually happened -
+   # useful for telling a fresh alarm apart from one that's still within its
+   # ALARM_RECENCY_S re-announce window.
+   #
+   # Unlike lastConduitUpdateServerDateTime (a true UTC epoch in ms - see
+   # EPOCH_ADJUST_S), lastAlarm["dateTime"]'s digits are ALREADY local
+   # wall-clock time, confirmed on real hardware: displaying them with a
+   # further timezone/DST offset ADDED showed a time 2 hours ahead of the
+   # real CEST clock. convert_datetimestr_to_epoch() parses those digits
+   # with no timezone awareness at all, so its result already directly
+   # matches local wall-clock time for display - but comparing it as-is
+   # against time.time() (true UTC) for the recency check silently
+   # inflated the effective "still recent" window by the full offset (2h
+   # for CEST) instead of the intended ALARM_RECENCY_S (15 min): a
+   # low/high-glucose alarm could stay shown for ~2h15m after it actually
+   # fired, not 15 minutes, on top of the separate current-glucose check
+   # below. Fixed by shifting the naively-parsed value BACK by the offset
+   # to get a true UTC epoch for the comparison, while still displaying
+   # the original (already-local) value directly.
    try:
-      if convert_datetimestr_to_epoch(lastAlarm["dateTime"]) > (time.time() - ALARM_RECENCY_S):
-         return getFaultStr(lastAlarm["faultId"])
+      naive_local_epoch = convert_datetimestr_to_epoch(lastAlarm["dateTime"])
+      # "naive_local_epoch and ..." also guards against a parse failure
+      # (which returns 0, see convert_datetimestr_to_epoch) ever being
+      # mistaken for a recent alarm.
+      if not naive_local_epoch:
+         return None, None
+      offset_s = (int(timezone) + dst_delta) * 3600
+      utc_epoch = naive_local_epoch - offset_s
+      if utc_epoch > (time.time() - ALARM_RECENCY_S):
+         canonical_id = faultIdMapping.get(lastAlarm["faultId"], lastAlarm["faultId"])
+         if current_sg is not None:
+            if canonical_id in LOW_GLUCOSE_FAULT_IDS and current_sg > HYPO_THRESHOLD_MGDL:
+               return None, None  # glucose has recovered - notification is stale
+            if canonical_id in HIGH_GLUCOSE_FAULT_IDS and current_sg < HYPER_THRESHOLD_MGDL:
+               return None, None  # glucose has come back down - notification is stale
+         return getFaultStr(lastAlarm["faultId"]), time.localtime(naive_local_epoch)
    except (KeyError, TypeError):
       pass
-   return None
+   return None, None
 
 
 #################################################
@@ -783,6 +844,7 @@ def new_state():
       "last_update_tm": None,
       "banner": None,
       "alarm_text": None,
+      "alarm_tm": None,  # local time the alarm itself occurred, not "now"
    }
 
 
@@ -814,7 +876,12 @@ def handle_pumpdataupdate(proxyaddr, proxyport, timezone):
       unix_epoch_s = int(data["lastConduitUpdateServerDateTime"]/1000)
       state["last_update_tm"] = time.localtime(
          unix_epoch_s - EPOCH_ADJUST_S + (int(timezone)+dstDelta)*3600)
-      state["alarm_text"] = get_alarm_text(data["lastAlarm"])
+      try:
+         current_sg = data["lastSG"]["sg"]
+         current_sg = current_sg if current_sg > 0 else None
+      except (KeyError, TypeError):
+         current_sg = None
+      state["alarm_text"], state["alarm_tm"] = get_alarm_text(data["lastAlarm"], timezone, dstDelta, current_sg)
    except (KeyError, TypeError):
       pass
 
@@ -879,7 +946,43 @@ def handle_pumpdataupdate(proxyaddr, proxyport, timezone):
 # earlier layout sketch were dropped per on-device visual feedback - this
 # is just the glucose figure, its unit/trend, and active insulin.
 #
+# Red-banner ghosting: this panel's red plane doesn't fully clear on a
+# single full-panel refresh when the previous frame had a large solid red
+# area (the alarm banner) - a caregiver reported the glucose number
+# updating fine while the red banner itself stayed on screen after the
+# alarm had aged out. This is the physical red e-ink pigment being slower
+# to migrate than black/white, not a framebuffer bug: clear_display()
+# already zeroes this driver's own framebuffer every cycle (see
+# handle_pumpdataupdate()/draw_screen() below), so what's lingering is
+# purely on the panel's glass. The fix is an extra blank (all-white)
+# display() pass to force a second physical flash, but only on the one
+# cycle where a banner just stopped being shown - every cycle would
+# double the ~17-23s awake time this design otherwise avoids. Since
+# main() carries no state across a deep-sleep restart by design, that
+# "was a banner shown last cycle" bit is stashed in RTC memory instead of
+# the config file (survives deep sleep, no flash wear, cleared to
+# "no banner" on a true cold boot - which is fine, there's nothing to
+# clear yet). Needs on-device confirmation that one extra pass is enough;
+# if ghosting persists, this is the place to add more passes.
+#
 #################################################
+
+_rtc = machine.RTC()
+
+
+def _had_banner_last_cycle():
+   try:
+      return _rtc.memory() == b"\x01"
+   except Exception:
+      return False
+
+
+def _set_banner_flag(has_banner):
+   try:
+      _rtc.memory(b"\x01" if has_banner else b"\x00")
+   except Exception:
+      pass
+
 
 FONT_HEIGHT_1X = 16  # gfx_standard_font_01, confirmed via get_ch() on real hw
 
@@ -929,6 +1032,14 @@ def truncate_to_width(inkplate, s, max_w, size):
 
 def draw_screen(inkplate, state):
    inkplate.clear_display()
+
+   banner_text = state["alarm_text"] or state["banner"]
+
+   if not banner_text and _had_banner_last_cycle():
+      # See "Red-banner ghosting" comment above - force one extra blank
+      # flash to physically clear the outgoing red banner before drawing
+      # this cycle's real (non-banner) content into the same buffer below.
+      inkplate.display()
 
    BLACK = inkplate.BLACK
    WHITE = inkplate.WHITE
@@ -981,13 +1092,24 @@ def draw_screen(inkplate, state):
    # showing is current, and a timestamp that stops advancing is how
    # you'd notice the device's battery died (staleness signal).
    bottom_y = insulin_y + FONT_HEIGHT_1X + 2
-   banner_text = state["alarm_text"] or state["banner"]
    inkplate.set_text_size(1)
    if banner_text:
+      # For a genuine pump alarm (not the generic systemStatusMessage/
+      # pumpBannerState banner, neither of which carries a comparable
+      # timestamp), append when it actually occurred - lets a caregiver
+      # tell a fresh alarm apart from one still showing only because it's
+      # within ALARM_RECENCY_S of its own occurrence, not "now". Truncate
+      # the message first, not the concatenated string, so this suffix is
+      # never the part that gets clipped.
+      suffix = ""
+      if state["alarm_text"] and state["alarm_tm"] is not None:
+         hh, mm = state["alarm_tm"][3], state["alarm_tm"][4]
+         suffix = " (%02d:%02d)" % (hh, mm)
       inkplate.fill_rect(0, bottom_y, PANEL_W, FONT_HEIGHT_1X, RED)
       inkplate.set_text_color(WHITE)
       inkplate.set_cursor(1, bottom_y)
-      inkplate.print(truncate_to_width(inkplate, banner_text, PANEL_W-2, 1))
+      max_w = PANEL_W - 2 - text_width(inkplate, suffix, 1)
+      inkplate.print(truncate_to_width(inkplate, banner_text, max_w, 1) + suffix)
    else:
       if state["last_update_tm"] is not None:
          now = local_now(current_timezone[0], dstDelta)
@@ -1009,6 +1131,7 @@ def draw_screen(inkplate, state):
       inkplate.print(truncate_to_width(inkplate, age_txt, PANEL_W-4, 1))
 
    inkplate.display()
+   _set_banner_flag(bool(banner_text))
 
 
 # current_timezone is a 1-element list so draw_screen can read the value set
