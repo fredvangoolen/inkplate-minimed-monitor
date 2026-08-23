@@ -407,9 +407,60 @@
   }
 
   @media print {
-    html, body { font-size: 15px; }
+    /* A strict black/white/gray palette, overriding every token this
+       page's components already draw from - not just a fallback for
+       monochrome printers. The `monochrome` media feature that could in
+       principle detect one isn't reliably available at print time (the
+       browser generating this PDF doesn't know what printer it'll end up
+       on), so the safer move is to make the DEFAULT print output work on
+       both: no color-only distinctions, no large flat color fills
+       wasting toner on the fills a color printer would otherwise render
+       as pale washes anyway. Three "soft" fills that used to carry their
+       role by hue (teal="cloud stage", amber="proxy stage", red="alarm")
+       now step through three distinct gray lightnesses instead, borders
+       drop to solid black, and every one of them is still backed by its
+       own text label - nothing here relies on color alone to be
+       legible. Figure 5's device-panel mock is deliberately exempt (see
+       its literal hex fills below) - it's depicting the Inkplate 2's own
+       actual black/white/red ink, not this document's theme, so leaving
+       it to reduce to grayscale like the real hardware would is correct. */
+    :root {
+      --paper: #ffffff;
+      --paper-raised: #f4f4f4;
+      --paper-sunken: #ececec;
+      --ink: #000000;
+      --ink-muted: #333333;
+      --ink-faint: #5a5a5a;
+      --rule: #999999;
+      --rule-strong: #444444;
+      --red: #000000;
+      --red-ink: #000000;
+      --red-soft: #c4c4c4;
+      --red-soft-rule: #333333;
+      --teal: #000000;
+      --teal-soft: #f0f0f0;
+      --teal-soft-rule: #555555;
+      --amber: #000000;
+      --amber-soft: #dcdcdc;
+      --amber-soft-rule: #444444;
+      --code-bg: #eeeeee;
+    }
+
+    html, body { font-size: 15px; background: #fff; color: #000; }
     main { padding: 0 !important; max-width: none; }
     .page { max-width: none; }
+
+    /* No card shadows or gradients - just a black rule, so the boxed
+       elements (diagram frames, callouts, stat cells) stay unambiguous
+       on a printer that can't render the shadow's soft falloff at all. */
+    figure .fig-frame, pre.mermaid, .stat-strip, .callout {
+      box-shadow: none !important;
+      border: 1px solid #000 !important;
+    }
+    .stat-strip { background: #000; }
+    .stat-strip > div { background: #fff; }
+    .callout { border-left-width: 4px !important; }
+    .tag { background: #fff; border-color: #000; color: #000; }
 
     /* Chrome's print layout engine avoids splitting a tall block by
        pushing it whole onto the next page - without a height cap, a
