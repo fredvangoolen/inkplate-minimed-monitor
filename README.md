@@ -8,6 +8,8 @@ A remote monitor for the Medtronic Minimed 770G/780G insulin pump system, built 
 
 A single always-current view: current glucose reading (colored red when out of a configurable target range), trend direction, active insulin on board, and either a "last updated" timestamp or an active pump alarm banner.
 
+<img src="img/inkplate.jpg" alt="Inkplate 2 showing a normal reading with a Delivery Suspend banner" width="400"> <img src="img/inkplate-hypo.jpg" alt="Inkplate 2 showing a low glucose reading in red with a Low Sensor Glucose banner" width="400">
+
 ## Hardware
 
 - [Soldered Inkplate 2](https://soldered.com/product/inkplate-2/) (2.13", 212×104px, black/white/red e-paper, classic ESP32)
