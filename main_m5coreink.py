@@ -1638,6 +1638,42 @@ def draw_info_screen(state, cfg, ip):
    # the only one that predicts the device silently dying, which on a
    # monitor whose whole job is to be trusted at a glance matters more than
    # any of the static settings below it.
+   #
+   # TODO: low-battery alarm. Measured on this device before deciding it was
+   # worth doing - 159 samples on a resting battery spread 4276-4306mV,
+   # stdev 4.9mV, 5mV quantisation. So the reading is PRECISE enough
+   # (repeatable to about +/-15mV) even though it is only an ADC on GPIO35
+   # behind a 25.1k/5.1k divider with no fuel gauge, which leaves absolute
+   # accuracy somewhere around +/-50-100mV after eFuse Vref calibration and
+   # resistor tolerance. Notes for whoever implements it:
+   #
+   #  * Threshold on millivolts (getBatteryVoltage()), NOT on the percentage
+   #    above. M5Unified computes it as (mv-3300)*100/(4150-3350) - it
+   #    subtracts 3300 but divides by 800, so the two ends disagree - and it
+   #    saturates at 100% from 4100mV up, so a full and a charging battery
+   #    are indistinguishable. It is also a straight line across a Li-ion
+   #    curve that is nearly flat between 3.9V and 3.6V.
+   #  * Roughly 3600mV for a warning, 3450mV for critical.
+   #  * Take a median of ~5 reads: _getBatteryAdcRaw() is a single-shot ADC
+   #    conversion with no averaging.
+   #  * Sample at a fixed point in the cycle - after wlan.active(False) in
+   #    main(), before drawing. WiFi transmit bursts sag the rail, so a
+   #    reading taken mid-fetch reads low and would false-trigger.
+   #  * Require ~3 consecutive cycles below the threshold and clear only
+   #    above threshold+100mV, or it will flap around the trip point.
+   #  * Treat >4250mV as "on charger" and suppress. That is a better charger
+   #    test than M5.Power.isCharging(), which returns True on battery on
+   #    this board (confirmed while the pack was visibly discharging).
+   #  * Do NOT beep this every cycle the way get_alarm_text() alarms beep.
+   #    The buzzer's value is that it means "glucose emergency"; a battery
+   #    warning repeating all evening would train the caregiver to ignore
+   #    it, which is precisely the failure the buzzer exists to prevent. A
+   #    persistent on-screen indicator plus one beep on the transition keeps
+   #    that signal clean.
+   #  * The thresholds above are datasheet-nominal. The board has spent
+   #    nearly all its life on USB, so there is no measured discharge curve
+   #    for this actual cell yet; log voltage per cycle through one full
+   #    run-down before trusting them.
    rows = (
       ("Battery",  batt),
       ("WiFi",     wifissid or "--"),
