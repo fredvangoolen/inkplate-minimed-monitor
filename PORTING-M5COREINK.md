@@ -200,7 +200,43 @@ bounded except the AP-mode config server, which only runs with a person
 standing at the device. There is also a hard cap on one awake session
 (`TOGGLE_SESSION_MAX_MS`) that per-press extensions cannot defeat.
 
-**3. Level-triggered wake on a pin that is already low.** `ext0`/`ext1` wake
+**3. Sleeping without holding the power rail — kills the board on battery.**
+GPIO12 latches the board's power rail on, and reads high the whole time the
+device runs. ESP32 deep sleep disables GPIO output drivers, so the latch
+releases the moment you sleep and, on battery, the board **powers off
+completely**: it never wakes, the reset button does nothing (there is no
+rail left to reset), and the panel fades as its bias collapses. On USB the
+fault is invisible, because USB feeds the rail directly — which is exactly
+why it looked like a mysterious "locks up only when unplugged" bug.
+
+`sleep_until()` therefore asserts GPIO12 and calls
+`esp32.gpio_deep_sleep_hold(True)` before sleeping, and `main()` releases
+that hold as its first action (held pads cannot be re-driven).
+
+GPIO12 is also the MTDI strapping pin that selects flash voltage at boot,
+which is normally a reason *not* to hold it high — but this board tolerates
+it: 13 consecutive cycles woke with `reset_cause=DEEPSLEEP_RESET` and GPIO12
+still reading 1. If a future board or firmware fails to boot after sleeping,
+suspect this first; pulling EN low (reset button or esptool) clears the hold
+by power-cycling the RTC domain.
+
+Two alternatives were measured and rejected. `M5.Power.deepSleep()` sleeps
+the panel but never touches `power_hold`, so it dies on battery exactly like
+a bare `machine.deepsleep()`. `M5.Power.timerSleep()` does survive — it
+powers the board down and lets the RTC switch it back on — but every wake is
+then a cold boot (`cause=2`) with no RTC memory and no GPIO wake, which would
+cost the toggle switch entirely.
+
+**4. Leaving the panel powered through sleep.** Call `M5.Lcd.powerSaveOn()`
+before sleeping and `powerSaveOff()` after, or the panel's booster and VCOM
+stay energised: current is wasted and the image drifts into a washed-out,
+half-transparent version of itself. Use `powerSave`, **not** `sleep` —
+`setPowerSave` issues Power OFF (`0x02`) alone, while `setSleep` also sends
+DSLP (`0x07`/`0xA5`), and leaving DSLP needs a full panel reset that
+`clear_display=False` deliberately skips. (`M5.Lcd.sleep()` is not exposed in
+MicroPython anyway; only `powerSaveOn`/`powerSaveOff` are.)
+
+**5. Level-triggered wake on a pin that is already low.** `ext0`/`ext1` wake
 on a *level*. Arming a pin that is currently held down makes `deepsleep()`
 return immediately, every time — the board would spin wake→redraw→sleep as
 fast as it can boot and flatten the battery in hours. `arm_toggle_wake()`
