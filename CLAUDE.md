@@ -8,6 +8,8 @@ A remote monitor for the Medtronic Minimed 770G/780G insulin pump, for a caregiv
 
 The whole project is one file, `main.py` — there's no build step, package manifest, or test suite.
 
+`main_m5coreink.py` is a sibling port of the same application to an **M5Stack Core Ink** (1.54" 200×200 monochrome e-paper, ESP32-PICO-D4, UIFlow2 MicroPython firmware), which has a buzzer and so can sound pump alarms audibly. It is a separate, self-contained file — board-independent logic is duplicated, not shared, and must be updated in both. **Its hardware facts are not the Inkplate's** (different time epoch, no red ink, different fonts, single-precision floats); never copy hardware reasoning between the two files. See `PORTING-M5COREINK.md` for its firmware build, the required `boot_option` NVS setting, the deploy steps, and the on-device testing techniques (module import for display work, stubbing `http_get` to exercise the data path with no network).
+
 ## Origin
 
 This started as a redesign of a sibling M5Stack-based project (see the "Credits" note at the top of `main.py`) — the data-polling/config/AP-setup logic and the fault-code lookup tables carried over largely unchanged, but the GUI, timing, and alarm-handling layers are specific to this board's constraints (e-paper, no partial refresh, no speaker, no buttons beyond reset) and were designed from scratch. That history isn't tracked in this repo.

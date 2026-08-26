@@ -39,9 +39,23 @@ Config is persisted as JSON at `/minimed_config.json` on the device. To reset it
 
 - **No partial e-paper refresh** — every redraw is a full-panel flash/settle cycle (~17–23 seconds). This is a hardware/driver limitation of this board, not a bug.
 - **Deep sleep between cycles** — the whole script re-runs from scratch on every wake; there's no in-memory state carried between polls. This keeps average power draw low, since CGM readings only update roughly every 5 minutes upstream regardless of how often you poll.
-- **Visual-only alarms** — this board has no speaker, so pump alarms show as an on-screen banner only. A caregiver not looking at the display won't get an audible alert. This is a real, accepted limitation of using an e-paper board for this purpose, not an oversight.
+- **Visual-only alarms** — this board has no speaker, so pump alarms show as an on-screen banner only. A caregiver not looking at the display won't get an audible alert. This is a real, accepted limitation of using an e-paper board for this purpose, not an oversight. (The Core Ink port below resolves this — it has a buzzer.)
 
 See the comments at the top of `main.py` for further hardware/firmware quirks this design works around.
+
+## M5Stack Core Ink port
+
+`main_m5coreink.py` is a sibling port to the [M5Stack Core Ink](https://docs.m5stack.com/en/core/coreink) — 1.54" 200×200 monochrome e-paper, ESP32-PICO-D4 — running the UIFlow2 MicroPython firmware. It exists mainly because that board **has a buzzer**, so an active pump alarm gets an audible beep (one per update cycle, repeating while the alarm stands) rather than a banner nobody may be looking at.
+
+It also has a switch, so it carries three screens instead of one, cycled endlessly by flicking it either way:
+
+1. **Main** — glucose and trend arrows, active insulin, update time. The reading is drawn large when all is well and shrinks only when an alarm needs the bottom strip, where it appears in reverse video alongside the beep. Having no red ink, an out-of-range reading inverts the glucose band instead of colouring it.
+2. **Glucose, last 24 h** — time in target / above / below, and average SG, over a stacked bar.
+3. **Device & network** — battery, Wi-Fi, IP, proxy, NTP, timezone.
+
+Pressing the switch redraws from a cached snapshot without touching the network, so screens change immediately rather than waiting on Wi-Fi.
+
+Setup differs enough from the Inkplate (different firmware, a required NVS setting, and the app must be deployed **precompiled** or it runs the board out of memory) that it has its own document: **[PORTING-M5COREINK.md](PORTING-M5COREINK.md)**.
 
 ## How it works
 
