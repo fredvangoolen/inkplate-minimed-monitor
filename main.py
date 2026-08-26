@@ -865,7 +865,19 @@ def handle_pumpdataupdate(proxyaddr, proxyport, timezone):
    # parsing succeeding.
    try:
       dstDelta = 1 if data["clientTimeZoneName"].lower().find("summer")>-1 else 0
-      unix_epoch_s = int(data["lastConduitUpdateServerDateTime"]/1000)
+      # INTEGER division. This firmware's floats are single precision -
+      # confirmed on this board: 1000000000001.0 reads back as
+      # 1000000000000.0 - and lastConduitUpdateServerDateTime is a Unix time
+      # in MILLISECONDS, around 1.79e12 today, where a float32's 24-bit
+      # mantissa only resolves to about 64 seconds. Written as "/1000" this
+      # decoded a real payload stamped ...491468 as epoch ...512 instead of
+      # ...491, a 21-second error, and up to ~64s in the worst case. Since
+      # time_delta() below compares whole minute fields, that was enough to
+      # report the wrong "N min ago" - and to trip the 15-minute "No data"
+      # cutoff a minute early or late. json.loads() returns this field as an
+      # int and MicroPython ints are arbitrary precision, so "//" keeps the
+      # value exact and never converts to float at all.
+      unix_epoch_s = data["lastConduitUpdateServerDateTime"] // 1000
       state["last_update_tm"] = time.localtime(
          unix_epoch_s - EPOCH_ADJUST_S + (int(timezone)+dstDelta)*3600)
       try:
