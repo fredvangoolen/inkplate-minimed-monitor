@@ -1841,6 +1841,54 @@ WAKE_EXT0 = 2   # esp_sleep_wakeup_cause_t, verified on this device
 WAKE_EXT1 = 3
 
 
+# The board's power rail is latched on by GPIO12 held high (confirmed on
+# hardware: it reads 1 the whole time the device is running). ESP32 deep
+# sleep disables GPIO output drivers, so without the hold below the latch
+# releases the moment we sleep and, on battery, THE BOARD POWERS OFF
+# COMPLETELY. It never wakes, the reset button does nothing - there is no
+# rail left to reset - and the panel fades as its bias collapses. On USB the
+# fault is invisible, because USB feeds the rail directly.
+#
+# esp32.gpio_deep_sleep_hold() latches the pad states across the sleep so
+# the rail stays up. GPIO12 is also the MTDI strapping pin that selects
+# flash voltage at boot, which is normally a reason NOT to hold it high -
+# but this board tolerates it: 13 consecutive deep-sleep cycles woke with
+# reset_cause=DEEPSLEEP_RESET and GPIO12 still reading 1. If a future board
+# revision or firmware ever fails to boot after sleeping, this is the first
+# thing to suspect, and pulling EN low (reset button / esptool) clears the
+# hold because it power-cycles the RTC domain.
+#
+# M5.Power.deepSleep() is NOT a substitute: it sleeps the panel but never
+# touches power_hold, so it powers the board off on battery exactly like a
+# bare machine.deepsleep(). M5.Power.timerSleep() does survive - it powers
+# down and lets the RTC switch the board back on - but every wake is then a
+# cold boot with no RTC memory and no GPIO wake, which would cost the toggle
+# switch entirely.
+POWER_HOLD_PIN = 12
+
+
+def hold_power_rail():
+   try:
+      machine.Pin(POWER_HOLD_PIN, machine.Pin.OUT).value(1)
+      import esp32
+      esp32.gpio_deep_sleep_hold(True)
+   except Exception as e:
+      # Worth shouting about: on battery this is the difference between a
+      # monitor and a brick until someone presses the power button.
+      print("POWER HOLD FAILED (%s) - device may not survive sleep on battery" % e)
+
+
+def release_power_rail_hold():
+   # Called at the top of every cycle. While the pads are held they cannot
+   # be re-driven, so this must happen before anything reconfigures GPIO -
+   # and it means a bad hold can never compound across wakes.
+   try:
+      import esp32
+      esp32.gpio_deep_sleep_hold(False)
+   except Exception as e:
+      print("Releasing GPIO hold failed: %s" % e)
+
+
 def sleep_until(next_poll):
    # Sleep only until the next poll is actually due, rather than a fresh
    # full POLL_PERIOD_S. Without this, every toggle press would push the
@@ -1857,6 +1905,20 @@ def sleep_until(next_poll):
       remaining = POLL_PERIOD_S
    print("Sleeping for %d s" % remaining)
    arm_toggle_wake()
+
+   # Put the e-paper panel into its own low-power state. M5.Power.deepSleep()
+   # would do this via M5.Display.sleep(), but that is not reachable from
+   # MicroPython (M5.Lcd exposes only powerSave*), and M5.Power.deepSleep()
+   # cannot be used anyway - see hold_power_rail(). Skipping it leaves the
+   # panel's booster and VCOM energised through the whole sleep, which both
+   # wastes current and lets the image drift: the display slowly fades to a
+   # washed-out, half-transparent version of itself.
+   try:
+      M5.Lcd.powerSaveOn()
+   except Exception as e:
+      print("Panel powerSaveOn failed: %s" % e)
+
+   hold_power_rail()
    machine.deepsleep(int(remaining * 1000))
 
 
@@ -1868,6 +1930,11 @@ def main():
    # Only draw the version splash on a genuine cold boot: nobody needs to
    # re-see the version number every 5 minutes, and on a cold boot it is
    # useful confirmation that the right firmware came up.
+   # First thing, before any GPIO is touched: drop the pad hold left over
+   # from the previous sleep, or the pins stay frozen and nothing can be
+   # re-driven this cycle.
+   release_power_rail_hold()
+
    cold_boot = machine.reset_cause() != machine.DEEPSLEEP_RESET
    try:
       woke_on_toggle = machine.wake_reason() in (WAKE_EXT0, WAKE_EXT1)
@@ -1904,6 +1971,16 @@ def main():
          # board that will not start.
          print("M5.begin(cfg) rejected (%s), falling back" % e)
          M5.begin()
+
+      # Undo the panel power-down from the previous sleep. powerSaveOn()
+      # issues Power OFF (0x02) only - deliberately NOT the DSLP command
+      # that setSleep() would send, because leaving DSLP requires a full
+      # panel reset and clear_display=False specifically skips that. A
+      # plain Power ON (0x04) is enough to bring it back.
+      try:
+         M5.Lcd.powerSaveOff()
+      except Exception as e:
+         print("Panel powerSaveOff failed: %s" % e)
 
       if cold_boot:
          def _splash():

@@ -47,6 +47,12 @@ See the comments at the top of `main.py` for further hardware/firmware quirks th
 
 `main_m5coreink.py` is a sibling port to the [M5Stack Core Ink](https://docs.m5stack.com/en/core/coreink) — 1.54" 200×200 monochrome e-paper, ESP32-PICO-D4 — running the UIFlow2 MicroPython firmware. It exists mainly because that board **has a buzzer**, so an active pump alarm gets an audible beep (one per update cycle, repeating while the alarm stands) rather than a banner nobody may be looking at.
 
+<img src="img/siblings.jpg" alt="The M5Stack Core Ink and the Inkplate 2 side by side, both showing a glucose reading of 71 mg/dL with a steady trend and 1.0 U of active insulin" width="720">
+
+The two boards running the same monitor, minutes apart — the Core Ink on the left, the Inkplate 2 on the right.
+
+<img src="img/M5stack%20core%20ink.jpg" alt="The M5Stack Core Ink showing 73 mg/dL with a steady trend arrow, mg/dL unit, active insulin 1.2 U and the last update time" width="300">
+
 It also has a switch, so it carries three screens instead of one, cycled endlessly by flicking it either way:
 
 1. **Main** — glucose and trend arrows, active insulin, update time. The reading is drawn large when all is well and shrinks only when an alarm needs the bottom strip, where it appears in reverse video alongside the beep. Having no red ink, an out-of-range reading inverts the glucose band instead of colouring it.
