@@ -35,6 +35,8 @@ A single always-current view: current glucose reading (colored red when out of a
 
 Config is persisted as JSON at `/minimed_config.json` on the device. To reset it, delete that file via `mpremote` and reboot.
 
+> **Power it from a proper USB adapter, not a PC port.** A marginal supply can't source the WiFi radio's power-up inrush, and the board resets the instant the radio comes on. It looks like a software hang — the panel sits on the version splash and updates stop — but it's a reset loop that can never clear itself, because the device never reaches deep sleep and so cold-boots into the same failure every time. Flashing works fine on a weak port, since that draws almost nothing.
+
 ## Notes on this design
 
 - **No partial e-paper refresh** — every redraw is a full-panel flash/settle cycle (~17–23 seconds). This is a hardware/driver limitation of this board, not a bug.
