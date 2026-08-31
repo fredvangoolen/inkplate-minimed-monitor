@@ -81,8 +81,29 @@ ext0 is armed on GPIO37 and ext1 on GPIO39. Verified on hardware: up reports
 A button wake does **not** touch the network. It redraws from a snapshot of
 the last fetch held in RTC memory, so the screen changes immediately instead
 of waiting several seconds for Wi-Fi. After a press the device stays awake
-briefly (`TOGGLE_AWAKE_MS`, 15 s) so a run of quick flicks redraws at panel speed
-rather than paying a ~4s firmware boot per screen.
+(`TOGGLE_AWAKE_MS`, 15 s, restarted by each press) so a run of flicks redraws
+at panel speed rather than paying a ~2.7 s firmware boot per screen — long
+enough to read a screen and think before it gives up on you.
+
+A *scheduled* refresh deliberately opens no such window: it draws and sleeps
+immediately. That window used to exist and cost more than it was worth —
+being paid on every poll, ~283 times a day, whether or not anyone was there:
+
+| | with the window | without |
+|---|---|---|
+| awake per cycle | 11.3 s | **5.3 s** |
+| awake per day | ~53 min | **~25 min** |
+| duty cycle | 3.7 % | **1.7 %** |
+
+The only loss is that the first flick after a scheduled refresh waits out a
+boot (~2.7 s) instead of landing instantly; every flick after it is instant.
+Measured on hardware, poll cadence unchanged.
+
+Of the 5.3 s that remain, roughly 2.0 s is firmware and VM startup before a
+line of this file runs, 2.2 s is Wi-Fi association plus NTP, and the actual
+work — fetch, alarm beep, panel redraw — is about 0.4 s. The radio is
+powered for only ~2.6 s of the cycle; `wlan.active(False)` runs before the
+draw, both to free the ~45 KB the canvas needs and to keep the tail cheap.
 
 RTC memory also carries the current screen, the time the next poll is due,
 and a refresh counter. None of it is required for correctness — it may be
