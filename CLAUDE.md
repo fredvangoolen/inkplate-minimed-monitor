@@ -38,6 +38,12 @@ mpremote connect /dev/ttyUSB0 reset
   ```
 - Once the device is deployed and running its normal deep-sleep cycle, avoid unnecessary `mpremote` connections — each one forces a soft-reset that interrupts whatever cycle is in progress and defeats the point of leaving it running autonomously. Prefer just watching the panel.
 
+**Power it from a proper adapter, not a PC USB port.** A marginal supply cannot source the WiFi radio's power-up inrush (a few hundred mA), and the rail collapses the moment `wlan.active(True)` runs. Flashing and the REPL draw almost nothing, so a weak port passes every test *except* the one that matters, and the board can run for hours provided the radio is never activated.
+
+The symptom looks exactly like a software hang, which is what makes it expensive: the panel sits on the version splash and updates stop. It is really a reset loop, and self-sustaining — the reset means the device never reaches `machine.deepsleep()`, so the next boot is another cold boot, which redraws the splash and dies at the radio again, forever.
+
+Tell it apart from a real hang by watching the serial console across a hardware reset. A brownout shows repeated `rst:0x1 (POWERON_RESET)` (sometimes `0x10 RTCWDT_RTC_RESET` or `0x3 SW_RESET`); a MicroPython exception would show `SW_CPU_RESET` plus a traceback. To confirm it in isolation, run a few lines that do nothing but `network.WLAN(network.STA_IF)` then `active(True)` — no display, no `main.py`. If that alone resets the board, it is the supply, and no amount of reading the application code will help. Note the panel refresh is a red herring: inserting a settle delay after it changes nothing, and the fault reproduces with the display never touched.
+
 ## Architecture
 
 Everything lives in `main.py`, in this order: fault-code tables → config storage (plain JSON file at `/minimed_config.json`, filesystem root is `/` not `/flash/...`) → NTP/HTTP helpers → AP-mode config web server → WiFi connect → data-formatting helpers → alarm handling → pump data polling (`handle_pumpdataupdate()`, builds a plain `state` dict) → display (`draw_screen()`) → `main()`.
