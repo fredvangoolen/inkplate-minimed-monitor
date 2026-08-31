@@ -15,7 +15,7 @@ one loud beep per update cycle, in addition to the on-screen banner.
 
 ## Screens
 
-Three screens, cycled endlessly by the three-position switch (labelled
+Four screens, cycled endlessly by the three-position switch (labelled
 G37/G39/G38 on the case). Up (GPIO37) and down (GPIO39) both advance;
 press (GPIO38) is unused.
 
@@ -48,9 +48,39 @@ solid black, in-target hatched, above-target open. Fed by the proxy's
 `timeInRange` / `aboveHyperLimit` / `belowHypoLimit` / `averageSG` fields —
 the same four the sibling M5Stack project puts on its screen 2.
 
-**3 — Device & network.** Battery first (the only line that changes on its
-own, and the one that predicts the device dying), then Wi-Fi SSID, IP,
-proxy address and port, NTP server, timezone.
+**3 — Pump & sensor.** Patient name, insulin remaining in the reservoir
+(units and percent), sensor life left, and pump battery. Supplies rather than
+readings: none of it is urgent enough for the main screen, all of it is what
+you want to know before leaving the house. Values are drawn in the larger
+font — four rows where the next screen has eight, so the room is there.
+
+The patient name comes from the config (`patientname`), and falls back to the
+proxy's own `firstName` when that is unset. The fallback is the important
+half: the proxy already knows whose pump it is, so a device that has never
+been told a name still shows the right one. The setting exists to override it
+— a nickname, or two pumps in one house. It is deliberately *not* part of the
+"config is incomplete, start AP mode" test, or upgrading an existing device
+would strand it in setup mode over a cosmetic label.
+
+**4 — Device & network.** Battery first (the only line that changes on its
+own, and the one that predicts the device dying), then runtime on this
+charge, the current time, Wi-Fi SSID, IP, proxy address and port, and the
+app version. Eight rows, which is what fits.
+
+NTP server and timezone used to be here and were dropped to make room. Both
+are write-once settings readable from the config page; battery and runtime
+change by themselves, which is what a status screen is for.
+
+**Runtime** counts from the start of this power-on session, held in RTC
+memory (`session_start`) and carried across deep-sleep wakes. It is meant to
+answer "how many hours does a charge last", and it is deliberately *not*
+"time since USB was unplugged" — this board cannot know that.
+`Power_Class::isCharging()` has branches for the Paper, StickS3 and Tab5;
+CoreInk falls through to `charge_unknown`, because there is no charge-status
+pin and no PMIC to ask. Time since cold boot is the honest approximation:
+deep-sleep wakes preserve RTC memory, and only applying power or resetting
+clears it. Reset the board while it is on USB, then unplug, and the two
+numbers are the same.
 
 ### How the switch works across deep sleep
 
@@ -65,8 +95,29 @@ ext0 is armed on GPIO37 and ext1 on GPIO39. Verified on hardware: up reports
 A button wake does **not** touch the network. It redraws from a snapshot of
 the last fetch held in RTC memory, so the screen changes immediately instead
 of waiting several seconds for Wi-Fi. After a press the device stays awake
-briefly (`TOGGLE_AWAKE_MS`) so a run of quick flicks redraws at panel speed
-rather than paying a ~4s firmware boot per screen.
+(`TOGGLE_AWAKE_MS`, 15 s, restarted by each press) so a run of flicks redraws
+at panel speed rather than paying a ~2.7 s firmware boot per screen — long
+enough to read a screen and think before it gives up on you.
+
+A *scheduled* refresh deliberately opens no such window: it draws and sleeps
+immediately. That window used to exist and cost more than it was worth —
+being paid on every poll, ~283 times a day, whether or not anyone was there:
+
+| | with the window | without |
+|---|---|---|
+| awake per cycle | 11.3 s | **5.3 s** |
+| awake per day | ~53 min | **~25 min** |
+| duty cycle | 3.7 % | **1.7 %** |
+
+The only loss is that the first flick after a scheduled refresh waits out a
+boot (~2.7 s) instead of landing instantly; every flick after it is instant.
+Measured on hardware, poll cadence unchanged.
+
+Of the 5.3 s that remain, roughly 2.0 s is firmware and VM startup before a
+line of this file runs, 2.2 s is Wi-Fi association plus NTP, and the actual
+work — fetch, alarm beep, panel redraw — is about 0.4 s. The radio is
+powered for only ~2.6 s of the cycle; `wlan.active(False)` runs before the
+draw, both to free the ~45 KB the canvas needs and to keep the tail cheap.
 
 RTC memory also carries the current screen, the time the next poll is due,
 and a refresh counter. None of it is required for correctness — it may be

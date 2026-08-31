@@ -55,11 +55,12 @@ The two boards running the same monitor, minutes apart — the Core Ink on the l
 
 <img src="img/M5stack%20core%20ink.jpg" alt="The M5Stack Core Ink showing 73 mg/dL with a steady trend arrow, mg/dL unit, active insulin 1.2 U and the last update time" width="300">
 
-It also has a switch, so it carries three screens instead of one, cycled endlessly by flicking it either way:
+It also has a switch, so it carries four screens instead of one, cycled endlessly by flicking it either way:
 
 1. **Main** — glucose and trend arrows, active insulin, update time. The reading is drawn large when all is well and shrinks only when an alarm needs the bottom strip, where it appears in reverse video alongside the beep. Having no red ink, an out-of-range reading inverts the glucose band instead of colouring it.
 2. **Glucose, last 24 h** — time in target / above / below, and average SG, over a stacked bar.
-3. **Device & network** — battery, Wi-Fi, IP, proxy, NTP, timezone.
+3. **Pump & sensor** — patient, insulin left in the reservoir, sensor life remaining, pump battery.
+4. **Device & network** — battery, runtime on this charge, the time, Wi-Fi, IP, proxy, and the app version.
 
 Pressing the switch redraws from a cached snapshot without touching the network, so screens change immediately rather than waiting on Wi-Fi.
 
