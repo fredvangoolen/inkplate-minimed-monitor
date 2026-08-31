@@ -354,6 +354,10 @@ Two independent changes, both under `boards/M5STACK_CoreInk/`:
    nothing to roll back to, so a failed validation was never recoverable
    anyway.
 
+This is worth sending upstream — it affects every Core Ink running UIFlow2 on
+battery, not just this project. A branch and a draft description are ready and
+**not yet submitted**: see `firmware/upstream-pr.md`.
+
 Measured on the device, from reset to the latch being asserted:
 
 | Firmware | Latch asserted |
