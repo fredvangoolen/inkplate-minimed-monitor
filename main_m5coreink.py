@@ -605,8 +605,9 @@ def truncate_to_width(s, max_w, font):
 
 SCREEN_MAIN  = 0
 SCREEN_STATS = 1
-SCREEN_INFO  = 2
-SCREEN_COUNT = 3
+SCREEN_PUMP  = 2
+SCREEN_INFO  = 3
+SCREEN_COUNT = 4
 
 # The three-position switch, labelled G37/G39/G38 on the case: up is
 # GPIO37, down is GPIO39, press is GPIO38. Confirmed by watching every
@@ -623,7 +624,7 @@ SCREEN_COUNT = 3
 BTN_UP_PIN   = 37
 BTN_DOWN_PIN = 39
 
-RTC_STATE_VERSION = 1
+RTC_STATE_VERSION = 2
 
 
 def rtc_state_load():
@@ -658,7 +659,7 @@ def rtc_state_save(screen, next_poll, snap, cycle=0, boot=None):
 
 
 def make_snapshot(state, ip):
-   # A JSON-safe, compact projection of everything the three screens need.
+   # A JSON-safe, compact projection of everything the four screens need.
    # Times are stored as plain epoch ints rather than the 8-tuples
    # time.localtime() returns, because JSON would turn those into lists and
    # they would come back as lists, not tuples - a difference that would go
@@ -676,6 +677,13 @@ def make_snapshot(state, ip):
       "dst": dstDelta,
       "stats": state["stats"],
       "ip": ip,
+      # The pump screen's fields. Without these a toggle wake would draw it
+      # empty, since that path deliberately never touches the network.
+      "batt": state["battery_pct"],
+      "resu": state["reservoir_units"],
+      "resp": state["reservoir_pct"],
+      "sage": state["sage_hours"],
+      "pat": state["patient"],
    }
 
 
@@ -692,6 +700,11 @@ def state_from_snapshot(snap):
    st["alarm_text"] = snap.get("alarm")
    st["banner"] = snap.get("banner")
    st["stats"] = snap.get("stats") or {}
+   st["battery_pct"] = snap.get("batt")
+   st["reservoir_units"] = snap.get("resu")
+   st["reservoir_pct"] = snap.get("resp")
+   st["sage_hours"] = snap.get("sage", 255)
+   st["patient"] = snap.get("pat")
    dstDelta = snap.get("dst", 0)
    if snap.get("upd") is not None:
       st["last_update_tm"] = time.localtime(snap["upd"])
@@ -825,6 +838,8 @@ def web_page_config(ntpserver,timezone,proxyport):
             <td style="width: 300px;">IP address<br><input type="text" id="fproxyaddr" name="fproxyaddr"></td> \n \
             <tr style="vertical-align: top; background-color: rgb(230, 230, 255);"> \n \
             <td style="width: 300px;">Port<br><input type="text" id="fproxyport" name="fproxyport" value=%s></td> \n \
+            <tr style="vertical-align: top; background-color: rgb(230, 230, 255);"> \n \
+            <td style="width: 300px;">Patient name (optional)<br><input type="text" id="fpatient" name="fpatient"></td> \n \
             </tbody></table><br> \n \
             <input type="submit" value="Save"> \n \
             </form></body></html>' % (ntpserver,timezone,proxyport)
@@ -919,6 +934,7 @@ def do_access_point(ntpserver,timezone,proxyport):
          timezone  = get_url_param(rurl, "ftimezone")
          proxyaddr = get_url_param(rurl, "fproxyaddr")
          proxyport = get_url_param(rurl, "fproxyport")
+         patient   = get_url_param(rurl, "fpatient")
          if wifissid  != None and wifissid  != "" and \
             wifipass  != None and wifipass  != "" and \
             ntpserver != None and ntpserver != "" and \
@@ -944,6 +960,7 @@ def do_access_point(ntpserver,timezone,proxyport):
       "timezone":  timezone,
       "proxyaddr": proxyaddr,
       "proxyport": proxyport,
+      "patientname": patient,
    })
    print("New configuration parameters stored in config file\n")
    do_ap_status("New configuration parameters stored\nResetting device ...")
@@ -967,6 +984,13 @@ def read_config():
    timezone  = cfg.get('timezone')
    proxyaddr = cfg.get('proxyaddr')
    proxyport = cfg.get('proxyport')
+   # Optional on purpose. The proxy reports firstName, so a device that has
+   # never been told a name still shows the right one; this only exists to
+   # override it (a nickname, or two pumps in one house). Crucially it must
+   # NOT join the test below - an existing device upgraded to this build has
+   # no name in its config file, and forcing it into AP mode over a cosmetic
+   # label would strand a working monitor until someone walked over to it.
+   patient   = cfg.get('patientname')
 
    if proxyport == None:
       proxyport = DEFAULT_PROXY_PORT
@@ -979,7 +1003,7 @@ def read_config():
       print("Needed configuration parameters not found\n")
       do_access_point(ntpserver,timezone,proxyport)
 
-   return (wifissid,wifipass,proxyaddr,proxyport,ntpserver,timezone)
+   return (wifissid,wifipass,proxyaddr,proxyport,ntpserver,timezone,patient)
 
 
 #################################################
@@ -1214,15 +1238,17 @@ def beep():
 #################################################
 
 def new_state():
-   # battery_pct/reservoir_units/sensor_ok/sage_hours/sage_state are parsed
-   # and carried in state but NOT rendered by draw_screen(), same as in
-   # main.py. Kept since they're cheap to parse and are the obvious
-   # candidate for a compact status row later - which this board's square
-   # panel actually has room for, unlike the Inkplate's 104px height.
+   # battery_pct/reservoir_units/reservoir_pct/sage_hours are not on the
+   # main screen - a caregiver glancing at it wants glucose, not supplies -
+   # but they are what the pump screen is made of. sage_hours keeps 255 as
+   # its "unknown" sentinel, which is what the pump reports before a sensor
+   # has settled; it must render as "--" rather than as 255 hours of life.
    return {
       "haveData": False,
       "battery_pct": None,
       "reservoir_units": None,
+      "reservoir_pct": None,
+      "patient": None,
       "sensor_ok": False,
       "sage_hours": 255,
       "sage_state": "",
@@ -1296,9 +1322,13 @@ def handle_pumpdataupdate(proxyaddr, proxyport, timezone):
       if state["haveData"]:
          state["battery_pct"] = data["pumpBatteryLevelPercent"]
          state["reservoir_units"] = data["reservoirRemainingUnits"]
+         state["reservoir_pct"] = data.get("reservoirLevelPercent")
          state["sage_hours"] = data["sensorDurationHours"]
          state["sage_state"] = data["sensorState"]
       state["sensor_ok"] = bool(data.get("conduitSensorInRange"))
+      # The proxy already knows who the pump belongs to, so the configured
+      # name is only a label to override it with - see draw_pump_screen().
+      state["patient"] = data.get("firstName")
 
       if state["haveData"] and data["therapyAlgorithmState"]["autoModeShieldState"] != "FEATURE_OFF":
          state["trend"] = data["lastSGTrend"]
@@ -1628,6 +1658,53 @@ def draw_stats_screen(state):
    draw_kv_row(y, "Average", FONT_LABEL, avg_txt, FONT_UNIT, BLACK)
 
 
+def draw_pump_screen(state, cfg):
+   # Between glucose and the technical screen: everything about the pump
+   # itself that a caregiver might need to plan around - is there insulin
+   # left, is the sensor about to expire, is the battery about to die.
+   # None of it is urgent enough for the main screen, all of it is the kind
+   # of thing you want to know before leaving the house.
+   gfx().fillScreen(WHITE)
+   y = draw_screen_header("PUMP & SENSOR")
+
+   patient = cfg[5] or state.get("patient") or "--"
+
+   units = state.get("reservoir_units")
+   pct = state.get("reservoir_pct")
+   if units is None:
+      insulin = "--"
+   elif pct is None:
+      insulin = "%d U" % round(units)
+   else:
+      insulin = "%d U  %d%%" % (round(units), pct)
+
+   # 255 is the pump's "no sensor / not settled yet" sentinel, not a life
+   # of ten and a half days.
+   sage = state.get("sage_hours")
+   if sage is None or sage >= 255:
+      sensor = "--"
+   elif sage >= 48:
+      sensor = "%dd %dh" % (sage // 24, sage % 24)
+   else:
+      sensor = "%d h" % sage
+
+   batt = state.get("battery_pct")
+   pump_batt = "%d%%" % batt if batt is not None else "--"
+
+   # Values in the larger font: this screen has five rows where the info
+   # screen has eight, so the room is there and these are numbers someone
+   # reads across a room rather than settings they lean in to check.
+   rows = (
+      ("Patient",   patient),
+      ("Insulin",   insulin),
+      ("Sensor",    sensor),
+      ("Pump batt", pump_batt),
+   )
+   for label, value in rows:
+      h = draw_kv_row(y, label, FONT_LABEL, value, FONT_VALUE, BLACK)
+      y += h + 6
+
+
 def fmt_runtime(start):
    # Hours, because the question this answers is "how many hours does a
    # charge last" - days would round away exactly the resolution wanted.
@@ -1645,7 +1722,7 @@ def draw_info_screen(state, cfg, ip):
    y = draw_screen_header("DEVICE & NETWORK")
    # ntpserver/timezone are still in cfg (the other screens and the config
    # page use them); this screen no longer shows them.
-   wifissid, proxyaddr, proxyport, _ntp, _tz = cfg
+   wifissid, proxyaddr, proxyport, _ntp, _tz, _patient = cfg
 
    try:
       batt = "%d%%" % M5.Power.getBatteryLevel()
@@ -1703,6 +1780,8 @@ FULL_REFRESH_EVERY = 12
 def draw_current_screen(screen, state, cfg, ip, full_refresh=False):
    if screen == SCREEN_STATS:
       compose(lambda: draw_stats_screen(state), full_refresh)
+   elif screen == SCREEN_PUMP:
+      compose(lambda: draw_pump_screen(state, cfg), full_refresh)
    elif screen == SCREEN_INFO:
       compose(lambda: draw_info_screen(state, cfg, ip), full_refresh)
    else:
@@ -2098,9 +2177,9 @@ def main():
       session_start[0] = rtc.get("boot")
       note_session_start()   # in case the clock is already good (a wake)
 
-      wifissid,wifipass,proxyaddr,proxyport,ntpserver,timezone = read_config()
+      wifissid,wifipass,proxyaddr,proxyport,ntpserver,timezone,patient = read_config()
       current_timezone[0] = timezone
-      cfg = (wifissid, proxyaddr, proxyport, ntpserver, timezone)
+      cfg = (wifissid, proxyaddr, proxyport, ntpserver, timezone, patient)
       print("wifissid: %s, proxyaddr: %s, proxyport: %s, ntpserver: %s, timezone: %s" %
             (wifissid,proxyaddr,proxyport,ntpserver,timezone))
 
@@ -2109,7 +2188,7 @@ def main():
       # and fetching would add several seconds between the flick and the
       # screen changing, on top of the ~4s this board already spends
       # booting its firmware before reaching this line - and none of the
-      # three screens gains anything from data a few minutes fresher. The
+      # four screens gains anything from data a few minutes fresher. The
       # scheduled poll below is what keeps the data current; this path only
       # changes which view of it is showing.
       if woke_on_toggle and not cold_boot:

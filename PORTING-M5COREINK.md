@@ -15,7 +15,7 @@ one loud beep per update cycle, in addition to the on-screen banner.
 
 ## Screens
 
-Three screens, cycled endlessly by the three-position switch (labelled
+Four screens, cycled endlessly by the three-position switch (labelled
 G37/G39/G38 on the case). Up (GPIO37) and down (GPIO39) both advance;
 press (GPIO38) is unused.
 
@@ -48,7 +48,21 @@ solid black, in-target hatched, above-target open. Fed by the proxy's
 `timeInRange` / `aboveHyperLimit` / `belowHypoLimit` / `averageSG` fields —
 the same four the sibling M5Stack project puts on its screen 2.
 
-**3 — Device & network.** Battery first (the only line that changes on its
+**3 — Pump & sensor.** Patient name, insulin remaining in the reservoir
+(units and percent), sensor life left, and pump battery. Supplies rather than
+readings: none of it is urgent enough for the main screen, all of it is what
+you want to know before leaving the house. Values are drawn in the larger
+font — four rows where the next screen has eight, so the room is there.
+
+The patient name comes from the config (`patientname`), and falls back to the
+proxy's own `firstName` when that is unset. The fallback is the important
+half: the proxy already knows whose pump it is, so a device that has never
+been told a name still shows the right one. The setting exists to override it
+— a nickname, or two pumps in one house. It is deliberately *not* part of the
+"config is incomplete, start AP mode" test, or upgrading an existing device
+would strand it in setup mode over a cosmetic label.
+
+**4 — Device & network.** Battery first (the only line that changes on its
 own, and the one that predicts the device dying), then runtime on this
 charge, the current time, Wi-Fi SSID, IP, proxy address and port, and the
 app version. Eight rows, which is what fits.
