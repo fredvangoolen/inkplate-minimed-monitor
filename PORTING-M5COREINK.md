@@ -92,7 +92,8 @@ two files.**
 | Text | proportional 16px `gfx_standard_font_01` | M5GFX bitmap fonts, max height **50px** |
 | Refresh | ~17–23 s | ~37 ms per screen (see below) |
 | HTTP | no `requests` module | `requests2` present (unused — see below) |
-| Power | none needed | power-hold latch GPIO12, asserted by `M5.begin()` |
+| Power | none needed | power-hold latch GPIO12, asserted 50 ms into boot (patched firmware; stock ~2 s) |
+| Buttons | reset only | toggle 37 / 39 / 38, EXT 5, PWR 27, back button = bare EN reset |
 
 Two of these bit during the port and are worth calling out:
 
@@ -105,13 +106,64 @@ Two of these bit during the port and are worth calling out:
   seconds — so `int(ms/1000)` decoded a payload stamped `11:51:00` as
   `11:50:56`, and since `time_delta()` compares whole minute fields that
   reported *"5 min ago"* for a 4-minute-old reading. This port uses integer
-  division (`// 1000`). **`main.py` still has the `/1000` form and is likely
-  affected the same way** — unverified on Inkplate hardware.
+  division (`// 1000`). `main.py` carried the same `/1000` form and was fixed
+  the same way, after the error was confirmed against a live payload there too.
 
 `requests2` is available but the port keeps the hand-rolled socket `http_get()`
 anyway, because `settimeout()` gives a hard upper bound on how long a cycle can
 block. On an unattended monitor a fetch that hangs forever isn't a slow cycle,
 it's a dead device showing a stale reading.
+
+### On battery, the back button is an off switch
+
+The rail is latched on by GPIO12, and the *firmware* asserts it — inside
+M5GFX's board autodetect (`_pin_level(GPIO_NUM_12, true);  // POWER_HOLD_PIN
+12`), reached from the `M5.begin()` that UIFlow performs during its own boot.
+Measured on this device: **~1.5–3.0 s after reset**. A probe placed as the
+literal first line of `main.py` already found the pin driven (`ENA12=1`)
+before `mm` was even imported, so no arrangement of application code can
+establish the latch any earlier than the firmware already does.
+
+For those seconds after every reset, nothing holds the rail but whatever is
+feeding it from outside — USB, or a finger on the PWR button:
+
+| Button | GPIO | Pressed on USB | Pressed on battery |
+|---|---|---|---|
+| toggle up / down / press | 37 / 39 / 38 | app input | app input |
+| EXT | 5 | unused | unused |
+| PWR | 27 | unused | **hold ~3 s to switch the board on** |
+| back | — (EN) | resets | **switches the board off** |
+
+The back button is a bare EN reset: pressing it prints `rst:0x1
+(POWERON_RESET)` and does nothing else. It has no path to the power latch, so
+on battery it drops the rail and cannot restore it — and holding it only
+parks the chip in reset. The way back is the **PWR button held about three
+seconds**, bridging the rail by hand until the firmware takes over; a tap is
+not enough. USB always revives the board, because it feeds the rail directly.
+
+**No firmware can fix the button**, and it is worth being precise about why,
+because it is not a speed problem. EN stays low for as long as the button is
+held — 100–300 ms for a human press — and a chip sitting in reset cannot
+drive any pin at all. Booting faster only shortens the part *after* the
+button comes back up. M5's factory Arduino firmware, which takes the latch at
+~20 ms of app time, loses this race in exactly the same way.
+
+A reset that does *not* hold EN low is a different story, and it is the one
+that matters for an unattended monitor: a crash, a watchdog, or the
+`machine.reset()` fallback at the end of `main()`. There GPIO12 is undriven
+only for the boot itself — 50 ms with the firmware patch below, and that is
+short enough. **Measured on battery: a `machine.reset()` loop survives
+indefinitely**, a counter held in RTC memory climbing across reboot after
+reboot with the panel redrawing each time. Stock firmware cannot do this; its
+window is 2000 ms.
+
+Together the two results bracket the rail's coast time between ~50 ms and
+~100 ms. That is the entire physics of this fault: one capacitor, and how
+long GPIO12 is left floating.
+
+E-paper holds its last image with **no power at all**, so a board that has
+switched off looks exactly like one frozen mid-screen. Watch the serial
+console to tell them apart: a running board still prints its cycle.
 
 ### Never draw straight to `M5.Lcd`
 
@@ -204,8 +256,9 @@ standing at the device. There is also a hard cap on one awake session
 GPIO12 latches the board's power rail on, and reads high the whole time the
 device runs. ESP32 deep sleep disables GPIO output drivers, so the latch
 releases the moment you sleep and, on battery, the board **powers off
-completely**: it never wakes, the reset button does nothing (there is no
-rail left to reset), and the panel fades as its bias collapses. On USB the
+completely**: it never wakes, the back button does nothing (there is no rail
+left to reset — see *On battery, the back button is an off switch* above, and
+hold PWR for three seconds instead), and the panel fades as its bias collapses. On USB the
 fault is invisible, because USB feeds the rail directly — which is exactly
 why it looked like a mysterious "locks up only when unplugged" bug.
 
@@ -265,6 +318,58 @@ cd ~/uiflow_micropython/m5stack
 make BOARD=M5STACK_CoreInk
 # -> build-M5STACK_CoreInk/uiflow-<hash>.bin  (single image, flash at 0x0)
 ```
+
+### The power-hold patch — apply before building
+
+`firmware/coreink-power-hold.patch` must be applied to the
+`uiflow_micropython` tree before building. Without it a crash on battery
+leaves the board switched off until someone finds it and plugs in USB — see
+*On battery, the back button is an off switch* above.
+
+```bash
+cd ~/uiflow_micropython
+git apply .../inkplate-minimed-monitor/firmware/coreink-power-hold.patch
+```
+
+Two independent changes, both under `boards/M5STACK_CoreInk/`:
+
+1. **`board_init.c` plus `MICROPY_BOARD_STARTUP`** — drives GPIO12 high as
+   the first statement of `app_main`, before the MicroPython task is even
+   created. Stock UIFlow leaves the latch to M5GFX's board autodetect,
+   reached incidentally through `M5.begin()`. (M5Unified *does* assert a hold
+   pin deliberately for the Timer Cam in `Power_Class::begin()`; the Core Ink
+   branch of that same switch sets ADC and wake pins and never touches
+   `power_hold`. On Arduino, where `M5.begin()` runs in the first
+   milliseconds, the omission is invisible.)
+2. **`CONFIG_BOOTLOADER_SKIP_VALIDATE_ON_POWER_ON=y`** — the hook alone only
+   reached 980 ms, because the bootloader SHA-256s the entire 3.4 MB image on
+   every power-on reset. Deep-sleep wakes already skipped that
+   (`..._IN_DEEP_SLEEP=y` was already set), so the five-minute cycle never
+   paid this cost; only resets did. There is a single `factory` partition and
+   nothing to roll back to, so a failed validation was never recoverable
+   anyway.
+
+Measured on the device, from reset to the latch being asserted:
+
+| Firmware | Latch asserted |
+|---|---|
+| UIFlow2 stock | ~2000 ms |
+| M5 factory (Arduino) | ~400 ms |
+| patch, board hook only | ~980 ms |
+| **patch, both changes** | **50 ms** |
+
+The `printf` in `board_init.c` is what makes this observable — `ESP_LOGI`
+would be invisible, since this firmware builds with the default log level at
+ERROR. Watch for it on the console at every boot:
+
+```
+coreink: power hold (GPIO12) asserted at 50 ms
+```
+
+**Gotcha:** the sdkconfig change will not take effect on an existing build
+tree. `sdkconfig.defaults` entries are ignored once a value is recorded in
+`build-M5STACK_CoreInk/sdkconfig` — the build succeeds and silently keeps the
+old setting. Delete that file and rebuild.
 
 Flash it:
 

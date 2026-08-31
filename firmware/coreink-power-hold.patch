@@ -1,0 +1,95 @@
+diff --git a/m5stack/boards/M5STACK_CoreInk/mpconfigboard.cmake b/m5stack/boards/M5STACK_CoreInk/mpconfigboard.cmake
+index 47189c1c..baea56f4 100644
+--- a/m5stack/boards/M5STACK_CoreInk/mpconfigboard.cmake
++++ b/m5stack/boards/M5STACK_CoreInk/mpconfigboard.cmake
+@@ -4,6 +4,10 @@
+ 
+ # coreink https://github.com/m5stack/m5stack-board-id/blob/main/board.csv#L8
+ set(BOARD_ID 6)
++
++set(MICROPY_SOURCE_BOARD
++    ${MICROPY_BOARD_DIR}/board_init.c
++)
+ set(MICROPY_PY_LVGL 0)
+ 
+ # Font Support
+diff --git a/m5stack/boards/M5STACK_CoreInk/mpconfigboard.h b/m5stack/boards/M5STACK_CoreInk/mpconfigboard.h
+index e5596ae3..895da65d 100644
+--- a/m5stack/boards/M5STACK_CoreInk/mpconfigboard.h
++++ b/m5stack/boards/M5STACK_CoreInk/mpconfigboard.h
+@@ -7,5 +7,10 @@
+ #define MICROPY_HW_BOARD_NAME "M5STACK CoreInk"
+ #define MICROPY_HW_MCU_NAME "ESP32-S3"
+ 
++// Assert the power-hold latch (GPIO12) from app_main, before the
++// MicroPython task starts - see board_init.c.
++#define MICROPY_BOARD_STARTUP CoreInk_board_startup
++void CoreInk_board_startup(void);
++
+ // If not enable LVGL, ignore this...
+ #include "./../mpconfiglvgl.h"
+diff --git a/m5stack/boards/M5STACK_CoreInk/sdkconfig.board b/m5stack/boards/M5STACK_CoreInk/sdkconfig.board
+index 724b3624..834b0cd1 100644
+--- a/m5stack/boards/M5STACK_CoreInk/sdkconfig.board
++++ b/m5stack/boards/M5STACK_CoreInk/sdkconfig.board
+@@ -12,3 +12,11 @@ CONFIG_ESPTOOLPY_FLASHFREQ="80m"
+ CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+ 
+ CONFIG_FREERTOS_ENABLE_BACKWARD_COMPATIBILITY=y
++
++# Boot speed: the board's power rail is latched by GPIO12, and until firmware
++# asserts it (board_init.c, first thing in app_main) a reset on battery simply
++# switches the board off. Validating the 3.4MB app image costs ~900ms of that
++# window on every power-on reset. Deep-sleep wakes already skip it; skip it on
++# power-on too. There is no fallback partition to roll back to if validation
++# ever failed, so this trades nothing away.
++CONFIG_BOOTLOADER_SKIP_VALIDATE_ON_POWER_ON=y
+diff --git a/m5stack/boards/M5STACK_CoreInk/board_init.c b/m5stack/boards/M5STACK_CoreInk/board_init.c
+new file mode 100644
+index 00000000..46d48828
+--- /dev/null
++++ b/m5stack/boards/M5STACK_CoreInk/board_init.c
+@@ -0,0 +1,43 @@
++/*
++* SPDX-FileCopyrightText: 2026 M5Stack Technology CO LTD
++*
++* SPDX-License-Identifier: MIT
++*/
++
++#include "py/mpconfig.h"
++#include "esp_log.h"
++#include "driver/gpio.h"
++
++// The Core Ink's 3.3V rail is latched on by GPIO12. Out of reset that pad is
++// an input, so while running on battery the rail is held up by nothing but
++// the PWR button the user is pressing: if firmware does not take the latch
++// over before the button is released, the board switches straight back off.
++//
++// M5GFX does assert this pin, but only as a side effect of board autodetect
++// inside M5.begin() - measured at ~1.6s into a UIFlow MicroPython boot, where
++// M5Stack's own Arduino firmware gets there in ~20ms. That gap is why a reset
++// on battery powers this board off instead of restarting it, and it is far
++// longer than any human holds a button. Asserting the latch here, from
++// app_main before the MicroPython task is even created, closes it.
++#define COREINK_POWER_HOLD_PIN  GPIO_NUM_12
++
++void CoreInk_board_startup(void) {
++    gpio_config_t power_hold = {
++        .pin_bit_mask = 1ULL << COREINK_POWER_HOLD_PIN,
++        .mode = GPIO_MODE_OUTPUT,
++        .pull_up_en = GPIO_PULLUP_DISABLE,
++        .pull_down_en = GPIO_PULLDOWN_DISABLE,
++        .intr_type = GPIO_INTR_DISABLE,
++    };
++    gpio_config(&power_hold);
++    gpio_set_level(COREINK_POWER_HOLD_PIN, 1);
++    // printf, not ESP_LOGI: this firmware builds with the default log
++    // level at ERROR, so an INFO line would never be seen - and the
++    // whole point of this line is to prove on the console that the
++    // latch was taken early.
++    printf("coreink: power hold (GPIO12) asserted at %lu ms\n",
++        (unsigned long)esp_log_timestamp());
++
++    // Chain to the default startup: NVS init and flash size detection.
++    boardctrl_startup();
++}
