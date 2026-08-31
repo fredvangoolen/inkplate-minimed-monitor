@@ -61,6 +61,13 @@ It also has a switch, so it carries three screens instead of one, cycled endless
 
 Pressing the switch redraws from a cached snapshot without touching the network, so screens change immediately rather than waiting on Wi-Fi.
 
+> **On battery, the button on the back switches the board off, not on.** It is a
+> bare reset line, and the power rail is held up only once the firmware has
+> booted (~1.5 s in) — so a reset on battery drops the rail with nothing left to
+> restore it. Because e-paper keeps its last image with no power at all, the
+> board then looks frozen rather than off. Hold the **PWR button for about three
+> seconds** to switch it back on, or plug in USB.
+
 Setup differs enough from the Inkplate (different firmware, a required NVS setting, and the app must be deployed **precompiled** or it runs the board out of memory) that it has its own document: **[PORTING-M5COREINK.md](PORTING-M5COREINK.md)**.
 
 ## How it works

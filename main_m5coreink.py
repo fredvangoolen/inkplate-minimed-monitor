@@ -61,10 +61,13 @@
 #         http_get() below still goes through a raw socket anyway - see the
 #         comment there, it is about the unattended-device timeout
 #         guarantee, not about module availability.
-#  * M5.begin() asserts the board's power-hold latch (GPIO12) itself, so
-#         unlike a bare-MicroPython port this file does not need to hold it
-#         manually. Without that latch the board powers itself off the
-#         moment the power button is released while on battery.
+#  * The board's power-hold latch (GPIO12) is asserted by the firmware's
+#         own boot - inside M5GFX board autodetect, ~1.5 s after reset -
+#         well before the first line of this file runs, so unlike a
+#         bare-MicroPython port this file only has to hold it across deep
+#         sleep. Nothing here can make that assert earlier, which is why a
+#         reset on battery switches the board off outright; see
+#         hold_power_rail().
 #  * machine.deepsleep() between cycles re-runs this whole script from
 #         scratch on every wake, exactly as in main.py - main() is a single
 #         cycle, not a loop, and carries no state across a wake by design.
@@ -1845,9 +1848,13 @@ WAKE_EXT1 = 3
 # hardware: it reads 1 the whole time the device is running). ESP32 deep
 # sleep disables GPIO output drivers, so without the hold below the latch
 # releases the moment we sleep and, on battery, THE BOARD POWERS OFF
-# COMPLETELY. It never wakes, the reset button does nothing - there is no
-# rail left to reset - and the panel fades as its bias collapses. On USB the
-# fault is invisible, because USB feeds the rail directly.
+# COMPLETELY, and the back button does not bring it back: that button is a
+# bare EN reset (measured: it produces rst:0x1 POWERON_RESET) with no path to
+# the latch, so there is no rail left for it to reset. Only the PWR button
+# (GPIO27), held ~3 s - long enough to bridge the rail by hand until the
+# firmware asserts GPIO12 - restarts it. On USB the fault is invisible,
+# because USB feeds the rail directly. The panel keeps its last image with
+# no power at all, so a board that is off reads as a board that is frozen.
 #
 # esp32.gpio_deep_sleep_hold() latches the pad states across the sleep so
 # the rail stays up. GPIO12 is also the MTDI strapping pin that selects
@@ -1947,9 +1954,10 @@ def main():
    toggle_only = False
 
    try:
-      # M5.begin() also asserts the board's power-hold latch (GPIO12),
-      # without which the device switches itself off on battery as soon as
-      # the power button is released.
+      # The board's power-hold latch (GPIO12) is already high by the time
+      # this runs - the firmware's own boot reaches M5GFX board autodetect,
+      # which drives the pin, ~1.5 s after reset. Calling M5.begin() here
+      # does not establish the latch and moving it earlier cannot help.
       #
       # clear_display=False suppresses the extra M5.Display.clear() that
       # M5.begin() would otherwise do on every wake, and skips the panel

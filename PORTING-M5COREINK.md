@@ -92,7 +92,8 @@ two files.**
 | Text | proportional 16px `gfx_standard_font_01` | M5GFX bitmap fonts, max height **50px** |
 | Refresh | ~17–23 s | ~37 ms per screen (see below) |
 | HTTP | no `requests` module | `requests2` present (unused — see below) |
-| Power | none needed | power-hold latch GPIO12, asserted by `M5.begin()` |
+| Power | none needed | power-hold latch GPIO12, asserted by firmware ~1.5 s into boot |
+| Buttons | reset only | toggle 37 / 39 / 38, EXT 5, PWR 27, back button = bare EN reset |
 
 Two of these bit during the port and are worth calling out:
 
@@ -105,13 +106,51 @@ Two of these bit during the port and are worth calling out:
   seconds — so `int(ms/1000)` decoded a payload stamped `11:51:00` as
   `11:50:56`, and since `time_delta()` compares whole minute fields that
   reported *"5 min ago"* for a 4-minute-old reading. This port uses integer
-  division (`// 1000`). **`main.py` still has the `/1000` form and is likely
-  affected the same way** — unverified on Inkplate hardware.
+  division (`// 1000`). `main.py` carried the same `/1000` form and was fixed
+  the same way, after the error was confirmed against a live payload there too.
 
 `requests2` is available but the port keeps the hand-rolled socket `http_get()`
 anyway, because `settimeout()` gives a hard upper bound on how long a cycle can
 block. On an unattended monitor a fetch that hangs forever isn't a slow cycle,
 it's a dead device showing a stale reading.
+
+### On battery, the back button is an off switch
+
+The rail is latched on by GPIO12, and the *firmware* asserts it — inside
+M5GFX's board autodetect (`_pin_level(GPIO_NUM_12, true);  // POWER_HOLD_PIN
+12`), reached from the `M5.begin()` that UIFlow performs during its own boot.
+Measured on this device: **~1.5–3.0 s after reset**. A probe placed as the
+literal first line of `main.py` already found the pin driven (`ENA12=1`)
+before `mm` was even imported, so no arrangement of application code can
+establish the latch any earlier than the firmware already does.
+
+For those seconds after every reset, nothing holds the rail but whatever is
+feeding it from outside — USB, or a finger on the PWR button:
+
+| Button | GPIO | Pressed on USB | Pressed on battery |
+|---|---|---|---|
+| toggle up / down / press | 37 / 39 / 38 | app input | app input |
+| EXT | 5 | unused | unused |
+| PWR | 27 | unused | **hold ~3 s to switch the board on** |
+| back | — (EN) | resets | **switches the board off** |
+
+The back button is a bare EN reset: pressing it prints `rst:0x1
+(POWERON_RESET)` and does nothing else. It has no path to the power latch, so
+on battery it drops the rail and cannot restore it — and holding it only
+parks the chip in reset. The way back is the **PWR button held about three
+seconds**, bridging the rail by hand until the firmware takes over; a tap is
+not enough. USB always revives the board, because it feeds the rail directly.
+
+By the same mechanism, assume *any* reset on battery switches the board off
+rather than restarting it — including the `machine.reset()` fallback at the
+end of `main()`. That fallback only fires if `machine.deepsleep()` itself
+failed, so it trades a stuck device for an off one, and from Python there is
+no better option: the pad hold that survives deep sleep does not survive a
+restart, and the firmware's own assert is already as early as it can be.
+
+E-paper holds its last image with **no power at all**, so a board that has
+switched off looks exactly like one frozen mid-screen. Watch the serial
+console to tell them apart: a running board still prints its cycle.
 
 ### Never draw straight to `M5.Lcd`
 
@@ -204,8 +243,9 @@ standing at the device. There is also a hard cap on one awake session
 GPIO12 latches the board's power rail on, and reads high the whole time the
 device runs. ESP32 deep sleep disables GPIO output drivers, so the latch
 releases the moment you sleep and, on battery, the board **powers off
-completely**: it never wakes, the reset button does nothing (there is no
-rail left to reset), and the panel fades as its bias collapses. On USB the
+completely**: it never wakes, the back button does nothing (there is no rail
+left to reset — see *On battery, the back button is an off switch* above, and
+hold PWR for three seconds instead), and the panel fades as its bias collapses. On USB the
 fault is invisible, because USB feeds the rail directly — which is exactly
 why it looked like a mysterious "locks up only when unplugged" bug.
 
