@@ -61,13 +61,13 @@
 #         http_get() below still goes through a raw socket anyway - see the
 #         comment there, it is about the unattended-device timeout
 #         guarantee, not about module availability.
-#  * The board's power-hold latch (GPIO12) is asserted by the firmware's
-#         own boot - inside M5GFX board autodetect, ~1.5 s after reset -
-#         well before the first line of this file runs, so unlike a
-#         bare-MicroPython port this file only has to hold it across deep
-#         sleep. Nothing here can make that assert earlier, which is why a
-#         reset on battery switches the board off outright; see
-#         hold_power_rail().
+#  * The board's power-hold latch (GPIO12) is asserted by the firmware, not
+#         by this file, so unlike a bare-MicroPython port this file only has
+#         to hold it across deep sleep. It must happen fast: see
+#         firmware/coreink-power-hold.patch, which moves the assert to 50ms
+#         after reset (stock UIFlow: ~2s). That is what lets a crash or a
+#         machine.reset() recover on battery instead of switching the board
+#         off. See hold_power_rail().
 #  * machine.deepsleep() between cycles re-runs this whole script from
 #         scratch on every wake, exactly as in main.py - main() is a single
 #         cycle, not a loop, and carries no state across a wake by design.
@@ -1852,7 +1852,11 @@ WAKE_EXT1 = 3
 # bare EN reset (measured: it produces rst:0x1 POWERON_RESET) with no path to
 # the latch, so there is no rail left for it to reset. Only the PWR button
 # (GPIO27), held ~3 s - long enough to bridge the rail by hand until the
-# firmware asserts GPIO12 - restarts it. On USB the fault is invisible,
+# firmware asserts GPIO12 - restarts it. No firmware can rescue the back
+# button: it holds EN low for the whole press, and a chip in reset drives
+# nothing. A reset that does NOT hold EN low - a crash, a watchdog, the
+# machine.reset() below - does survive on battery, but only on the patched
+# firmware; verified there with a reset loop. On USB the fault is invisible,
 # because USB feeds the rail directly. The panel keeps its last image with
 # no power at all, so a board that is off reads as a board that is frozen.
 #
@@ -2161,7 +2165,10 @@ def main():
 
    # Still here? Then deepsleep() did not take. Sleep blind rather than fall
    # through to the REPL, and if even that fails, reset - a reboot costs one
-   # cycle, an idle REPL costs every cycle from now on.
+   # cycle, an idle REPL costs every cycle from now on. The reset is only
+   # survivable on battery because the patched firmware asserts the power
+   # hold 50ms into boot; on stock UIFlow this line would switch the board
+   # off for good. See hold_power_rail().
    try:
       machine.deepsleep(POLL_PERIOD_S * 1000)
    except Exception as e:
