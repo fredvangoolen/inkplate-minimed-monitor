@@ -642,7 +642,7 @@ def rtc_state_load():
    return {}
 
 
-def rtc_state_save(screen, next_poll, snap, cycle=0):
+def rtc_state_save(screen, next_poll, snap, cycle=0, boot=None):
    try:
       machine.RTC().memory(json.dumps({
          "v": RTC_STATE_VERSION,
@@ -650,6 +650,7 @@ def rtc_state_save(screen, next_poll, snap, cycle=0):
          "next_poll": next_poll,
          "snap": snap,
          "cycle": cycle,
+         "boot": boot,
       }))
    except Exception as e:
       # Losing this costs a stale toggle view for one cycle, nothing more.
@@ -1627,10 +1628,24 @@ def draw_stats_screen(state):
    draw_kv_row(y, "Average", FONT_LABEL, avg_txt, FONT_UNIT, BLACK)
 
 
+def fmt_runtime(start):
+   # Hours, because the question this answers is "how many hours does a
+   # charge last" - days would round away exactly the resolution wanted.
+   if not start:
+      return "--"
+   secs = time.time() - start
+   if secs < 0:
+      return "--"
+   hours = secs / 3600.0
+   return "%.1f h" % hours if hours < 100 else "%d h" % int(hours)
+
+
 def draw_info_screen(state, cfg, ip):
    gfx().fillScreen(WHITE)
    y = draw_screen_header("DEVICE & NETWORK")
-   wifissid, proxyaddr, proxyport, ntpserver, timezone = cfg
+   # ntpserver/timezone are still in cfg (the other screens and the config
+   # page use them); this screen no longer shows them.
+   wifissid, proxyaddr, proxyport, _ntp, _tz = cfg
 
    try:
       batt = "%d%%" % M5.Power.getBatteryLevel()
@@ -1641,14 +1656,25 @@ def draw_info_screen(state, cfg, ip):
    # the only one that predicts the device silently dying, which on a
    # monitor whose whole job is to be trusted at a glance matters more than
    # any of the static settings below it.
+   if time.time() > TIME_VALID_EPOCH:
+      now = local_now(current_timezone[0], dstDelta)
+      clock = "%02d:%02d" % (now[3], now[4])
+   else:
+      clock = "--"
+
+   # NTP server and timezone used to sit here. They were dropped rather than
+   # squeezed: both are write-once settings that can be read back from the
+   # config page, whereas runtime and battery change on their own and are
+   # the two numbers someone actually comes to this screen to find.
    rows = (
       ("Battery",  batt),
+      ("Runtime",  fmt_runtime(session_start[0])),
+      ("Time",     clock),
       ("WiFi",     wifissid or "--"),
       ("IP",       ip or "--"),
       ("Proxy",    proxyaddr or "--"),
       ("Port",     str(proxyport or "--")),
-      ("NTP",      ntpserver or "--"),
-      ("Timezone", "UTC%+d" % (int(timezone) + dstDelta) if timezone else "--"),
+      ("Version",  "V%s" % VERSION),
    )
    lh = font_height(FONT_LABEL)
    for label, value in rows:
@@ -1771,25 +1797,42 @@ def toggle_take():
 # sleeping immediately would put that latency in front of every single
 # screen change. Staying awake briefly makes a run of flicks redraw at
 # e-paper speed instead, and costs a few seconds of active current only
-# when someone is actually standing at the device.
-TOGGLE_AWAKE_MS = 6000
+# when someone is actually standing at the device. 15s rather than a couple
+# of seconds because the window is really "how long may someone think before
+# the device gives up on them" - long enough to read a screen, consider it,
+# and flick on. It does not delay the glucose poll: sleep_until() sleeps only
+# until the next poll is due, so time spent awake here comes out of the sleep
+# that followed it, never out of the update schedule.
+TOGGLE_AWAKE_MS = 15000
+
+# The same window, but for the session offered after a SCHEDULED refresh
+# rather than after a flick of the switch. It is deliberately shorter, and
+# must stay that way: that one runs on every poll, all day, whether or not
+# anybody is there, so every second of it is spent awake ~288 times a day
+# for nobody. The 15s above is only paid when someone has actually just
+# touched the switch. Raising this instead would roughly double the awake
+# time per cycle and take a visible bite out of battery life - which the
+# info screen's Runtime row will now show you.
+POST_REFRESH_AWAKE_MS = 6000
 
 # Bounds that exist purely so no switch fault can keep the device awake.
 # A held, wedged or chattering contact must degrade to "the screens stop
 # responding until the next scheduled wake", never to "the monitor stops
 # polling", which is indistinguishable from a dead device.
-TOGGLE_SESSION_MAX_MS = 90000   # absolute cap on one awake session
+# Scaled with TOGGLE_AWAKE_MS so the cap still allows a dozen presses rather
+# than half a dozen; it is a fault guard, not a usage budget.
+TOGGLE_SESSION_MAX_MS = 180000  # absolute cap on one awake session
 TOGGLE_RELEASE_MAX_MS = 3000    # give up waiting for the switch to spring back
 TOGGLE_DEBOUNCE_MS    = 120     # contact settle after each accepted press
 
 
-def run_toggle_session(screen, state, cfg, ip):
+def run_toggle_session(screen, state, cfg, ip, awake_ms=TOGGLE_AWAKE_MS):
    # Returns the screen index left on display. Each press advances one
    # screen and restarts the window, so holding a conversation with the
    # device never drops back to sleep mid-flick.
    install_toggle_irq()
    toggle_take()  # discard the press that woke us; it is already accounted for
-   deadline = time.ticks_add(time.ticks_ms(), TOGGLE_AWAKE_MS)
+   deadline = time.ticks_add(time.ticks_ms(), awake_ms)
    # Independent of the per-press deadline above, which every press extends.
    # Without this cap a switch held down, wedged, or chattering against a
    # failing contact would keep re-arming that deadline forever and the
@@ -1823,7 +1866,7 @@ def run_toggle_session(screen, state, cfg, ip):
             print("Toggle still held after %dms - ending session"
                   % TOGGLE_RELEASE_MAX_MS)
             break
-         deadline = time.ticks_add(time.ticks_ms(), TOGGLE_AWAKE_MS)
+         deadline = time.ticks_add(time.ticks_ms(), awake_ms)
       time.sleep_ms(10)
    return screen
 
@@ -1832,6 +1875,32 @@ def run_toggle_session(screen, state, cfg, ip):
 # by main() without needing a global statement for a plain module-level var
 # that main() also assigns before the cycle starts.
 current_timezone = [DEFAULT_TIME_ZONE]
+
+# Epoch second at which this power-on session started, or None before the
+# clock is trustworthy. Same 1-element-list trick as current_timezone.
+#
+# This is what the info screen's "Runtime" row counts from, and it answers
+# "how long has this run on one charge?". It is NOT a measure of time since
+# USB was unplugged, because this board cannot tell: M5Unified's isCharging()
+# has branches for the Paper, StickS3 and Tab5, and the Core Ink falls
+# through to charge_unknown - there is no charge-status pin and no PMIC to
+# ask. What it does measure is time since the last cold boot, which is the
+# same thing in practice, since deep-sleep wakes preserve RTC memory and
+# only applying power (or a reset) clears it. Reset the board while it is on
+# USB, then unplug, and the two coincide exactly.
+session_start = [None]
+
+# time.time() starts at the 1970 epoch on a cold boot and only becomes
+# meaningful once NTP has run, so anything below this is "clock not set yet"
+# rather than a real timestamp. 2020-09-13.
+TIME_VALID_EPOCH = 1600000000
+
+
+def note_session_start():
+   # Idempotent: the first cycle since power-on that has a valid clock wins,
+   # and every later wake carries the value forward in RTC memory.
+   if session_start[0] is None and time.time() > TIME_VALID_EPOCH:
+      session_start[0] = time.time()
 
 
 #################################################
@@ -2024,6 +2093,8 @@ def main():
       next_poll = rtc.get("next_poll")
       snap = rtc.get("snap")
       cycle = rtc.get("cycle", 0)
+      session_start[0] = rtc.get("boot")
+      note_session_start()   # in case the clock is already good (a wake)
 
       wifissid,wifipass,proxyaddr,proxyport,ntpserver,timezone = read_config()
       current_timezone[0] = timezone
@@ -2077,6 +2148,7 @@ def main():
                   break
                time.sleep_ms(1000)
             print("NTP synced: %s" % ntp_synced)
+            note_session_start()   # first valid clock since power-on starts it
 
             state = handle_pumpdataupdate(proxyaddr, proxyport, timezone)
 
@@ -2120,7 +2192,8 @@ def main():
 
             # Let someone standing at the device flick straight through the
             # screens after a refresh without waiting out a sleep/wake cycle.
-            screen = run_toggle_session(screen, state, cfg, ip)
+            screen = run_toggle_session(screen, state, cfg, ip,
+                                        awake_ms=POST_REFRESH_AWAKE_MS)
    except Exception as e:
       print("main() cycle failed: %s" % e)
 
@@ -2155,7 +2228,7 @@ def main():
       next_poll = None
 
    try:
-      rtc_state_save(screen, next_poll, snap, cycle)
+      rtc_state_save(screen, next_poll, snap, cycle, session_start[0])
    except Exception as e:
       print("RTC state save failed: %s" % e)
 

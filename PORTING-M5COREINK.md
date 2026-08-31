@@ -49,8 +49,24 @@ solid black, in-target hatched, above-target open. Fed by the proxy's
 the same four the sibling M5Stack project puts on its screen 2.
 
 **3 — Device & network.** Battery first (the only line that changes on its
-own, and the one that predicts the device dying), then Wi-Fi SSID, IP,
-proxy address and port, NTP server, timezone.
+own, and the one that predicts the device dying), then runtime on this
+charge, the current time, Wi-Fi SSID, IP, proxy address and port, and the
+app version. Eight rows, which is what fits.
+
+NTP server and timezone used to be here and were dropped to make room. Both
+are write-once settings readable from the config page; battery and runtime
+change by themselves, which is what a status screen is for.
+
+**Runtime** counts from the start of this power-on session, held in RTC
+memory (`session_start`) and carried across deep-sleep wakes. It is meant to
+answer "how many hours does a charge last", and it is deliberately *not*
+"time since USB was unplugged" — this board cannot know that.
+`Power_Class::isCharging()` has branches for the Paper, StickS3 and Tab5;
+CoreInk falls through to `charge_unknown`, because there is no charge-status
+pin and no PMIC to ask. Time since cold boot is the honest approximation:
+deep-sleep wakes preserve RTC memory, and only applying power or resetting
+clears it. Reset the board while it is on USB, then unplug, and the two
+numbers are the same.
 
 ### How the switch works across deep sleep
 
@@ -65,7 +81,7 @@ ext0 is armed on GPIO37 and ext1 on GPIO39. Verified on hardware: up reports
 A button wake does **not** touch the network. It redraws from a snapshot of
 the last fetch held in RTC memory, so the screen changes immediately instead
 of waiting several seconds for Wi-Fi. After a press the device stays awake
-briefly (`TOGGLE_AWAKE_MS`) so a run of quick flicks redraws at panel speed
+briefly (`TOGGLE_AWAKE_MS`, 15 s) so a run of quick flicks redraws at panel speed
 rather than paying a ~4s firmware boot per screen.
 
 RTC memory also carries the current screen, the time the next poll is due,

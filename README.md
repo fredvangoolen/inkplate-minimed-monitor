@@ -59,7 +59,7 @@ It also has a switch, so it carries three screens instead of one, cycled endless
 
 1. **Main** — glucose and trend arrows, active insulin, update time. The reading is drawn large when all is well and shrinks only when an alarm needs the bottom strip, where it appears in reverse video alongside the beep. Having no red ink, an out-of-range reading inverts the glucose band instead of colouring it.
 2. **Glucose, last 24 h** — time in target / above / below, and average SG, over a stacked bar.
-3. **Device & network** — battery, Wi-Fi, IP, proxy, NTP, timezone.
+3. **Device & network** — battery, runtime on this charge, the time, Wi-Fi, IP, proxy, and the app version.
 
 Pressing the switch redraws from a cached snapshot without touching the network, so screens change immediately rather than waiting on Wi-Fi.
 
