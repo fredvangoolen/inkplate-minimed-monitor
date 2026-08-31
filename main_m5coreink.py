@@ -1851,8 +1851,9 @@ WAKE_EXT1 = 3
 # COMPLETELY, and the back button does not bring it back: that button is a
 # bare EN reset (measured: it produces rst:0x1 POWERON_RESET) with no path to
 # the latch, so there is no rail left for it to reset. Only the PWR button
-# (GPIO27), held ~3 s - long enough to bridge the rail by hand until the
-# firmware asserts GPIO12 - restarts it. No firmware can rescue the back
+# (GPIO27) restarts it: that button powers the rail while it is down, and
+# for long enough after for the firmware to take the latch over - a brief
+# press is enough on the patched firmware. No firmware can rescue the back
 # button: it holds EN low for the whole press, and a chip in reset drives
 # nothing. A reset that does NOT hold EN low - a crash, a watchdog, the
 # machine.reset() below - does survive on battery, but only on the patched

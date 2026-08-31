@@ -68,7 +68,7 @@ Pressing the switch redraws from a cached snapshot without touching the network,
 > the pin that latches the power rail on — so the board switches off, and that
 > same button has no way to switch it back on. Because e-paper keeps its last
 > image with no power at all, it then looks frozen rather than off. Hold the
-> **PWR button for about three seconds** to switch it back on, or plug in USB.
+> **PWR button** to switch it back on, or plug in USB.
 > (Crashes and watchdog resets *do* recover by themselves — see
 > [PORTING-M5COREINK.md](PORTING-M5COREINK.md) for the firmware patch that
 > makes that work.)

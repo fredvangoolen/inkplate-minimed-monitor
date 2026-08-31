@@ -119,7 +119,9 @@ it's a dead device showing a stale reading.
 The rail is latched on by GPIO12, and the *firmware* asserts it — inside
 M5GFX's board autodetect (`_pin_level(GPIO_NUM_12, true);  // POWER_HOLD_PIN
 12`), reached from the `M5.begin()` that UIFlow performs during its own boot.
-Measured on this device: **~1.5–3.0 s after reset**. A probe placed as the
+Measured on this device: **between 1.65 s and 3.06 s after reset** — the pin
+already reads driven at 3.06 s, and the earliest M5 activity on the console
+is at 1.65 s. A probe placed as the
 literal first line of `main.py` already found the pin driven (`ENA12=1`)
 before `mm` was even imported, so no arrangement of application code can
 establish the latch any earlier than the firmware already does.
@@ -131,15 +133,17 @@ feeding it from outside — USB, or a finger on the PWR button:
 |---|---|---|---|
 | toggle up / down / press | 37 / 39 / 38 | app input | app input |
 | EXT | 5 | unused | unused |
-| PWR | 27 | unused | **hold ~3 s to switch the board on** |
+| PWR | 27 | unused | **press to switch the board on** |
 | back | — (EN) | resets | **switches the board off** |
 
 The back button is a bare EN reset: pressing it prints `rst:0x1
 (POWERON_RESET)` and does nothing else. It has no path to the power latch, so
 on battery it drops the rail and cannot restore it — and holding it only
-parks the chip in reset. The way back is the **PWR button held about three
-seconds**, bridging the rail by hand until the firmware takes over; a tap is
-not enough. USB always revives the board, because it feeds the rail directly.
+parks the chip in reset. The way back is the **PWR button**, which powers the
+rail for as long as it is down and long enough after for the firmware to take
+the latch over. On the patched firmware a brief tap is enough; on stock it was
+only ever tried as a ~3 s hold, which works. USB always revives the board too,
+because it feeds the rail directly.
 
 **No firmware can fix the button**, and it is worth being precise about why,
 because it is not a speed problem. EN stays low for as long as the button is
@@ -154,8 +158,9 @@ that matters for an unattended monitor: a crash, a watchdog, or the
 only for the boot itself — 50 ms with the firmware patch below, and that is
 short enough. **Measured on battery: a `machine.reset()` loop survives
 indefinitely**, a counter held in RTC memory climbing across reboot after
-reboot with the panel redrawing each time. Stock firmware cannot do this; its
-window is 2000 ms.
+reboot with the panel redrawing each time. The stock arm of that experiment
+was never run, so "stock dies here" is inference — but a 1.6–3 s window
+cannot survive what a few hundred milliseconds already kills.
 
 Together the two results bracket the rail's coast time between ~50 ms and
 ~100 ms. That is the entire physics of this fault: one capacitor, and how
@@ -348,6 +353,10 @@ Two independent changes, both under `boards/M5STACK_CoreInk/`:
    paid this cost; only resets did. There is a single `factory` partition and
    nothing to roll back to, so a failed validation was never recoverable
    anyway.
+
+This is worth sending upstream — it affects every Core Ink running UIFlow2 on
+battery, not just this project. A branch and a draft description are ready and
+**not yet submitted**: see `firmware/upstream-pr.md`.
 
 Measured on the device, from reset to the latch being asserted:
 
