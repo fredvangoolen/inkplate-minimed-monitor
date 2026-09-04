@@ -114,10 +114,43 @@ boot (~2.7 s) instead of landing instantly; every flick after it is instant.
 Measured on hardware, poll cadence unchanged.
 
 Of the 5.3 s that remain, roughly 2.0 s is firmware and VM startup before a
-line of this file runs, 2.2 s is Wi-Fi association plus NTP, and the actual
-work — fetch, alarm beep, panel redraw — is about 0.4 s. The radio is
-powered for only ~2.6 s of the cycle; `wlan.active(False)` runs before the
-draw, both to free the ~45 KB the canvas needs and to keep the tail cheap.
+line of this file runs, 2.1 s is Wi-Fi association, and the actual work —
+fetch, alarm beep, panel redraw — is about 0.4 s. The radio is powered for
+only ~2.6 s of the cycle; `wlan.active(False)` runs before the draw, both to
+free the ~45 KB the canvas needs and to keep the tail cheap.
+
+Measured individually, which is worth knowing before optimising the wrong
+thing: `wlan_connect()` **2081 ms**, `ntp_sync()` **64 ms**, `http_get()`
+**15 ms** for a 2.9 KB response. Association dominates and is radio-bound.
+
+### The clock comes from the proxy, not from NTP
+
+`http_get()` returns the epoch parsed out of the response's `Date:` header,
+and `handle_pumpdataupdate()` sets the clock from it before parsing the body.
+It is free — the header arrives with a response the device was fetching
+anyway — needs no DNS, and re-syncs every five minutes, so the clock cannot
+drift between syncs.
+
+NTP is only a fallback, run when `time.time()` is below `TIME_VALID_EPOCH`,
+which in practice means a device that has never had a clock. The reason is
+not the 64 ms of a successful sync; it is the failure path, which retries ten
+times at one-second intervals and so costs **up to 10 s** — doubling a cycle
+— on a network where DNS is filtered. Sourcing the time from the proxy takes
+DNS and an external server out of the five-minute path entirely.
+
+The trade is that the monitor's clock now depends on the proxy host being
+correctly synced. That host is the machine already deciding what "now" means
+for every reading it serves, so this couples two things that were always
+related; verified against the live proxy, its `Date` matched an
+independently-synced machine to the second.
+
+The clock is set *before* the body is parsed, because the alarm logic
+compares alarm timestamps against now — so even a device booting with no
+clock at all gets a correct one before anything depends on it. Any header
+that does not parse exactly returns `None` and is ignored rather than
+guessed at: a confidently wrong clock would silently corrupt "Updated N min
+ago", which is the number that tells a caregiver whether to trust what is on
+the screen.
 
 RTC memory also carries the current screen, the time the next poll is due,
 and a refresh counter. None of it is required for correctness — it may be

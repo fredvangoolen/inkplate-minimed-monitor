@@ -146,10 +146,11 @@ HYPER_THRESHOLD_MGDL = 180
 HYPO_THRESHOLD_MGDL  = 70
 
 # Timing. As in main.py there is no periodic NTP-resync interval to track
-# separately - main() resyncs NTP on every wake, since machine.deepsleep()
-# re-runs the whole script from scratch each cycle anyway and there is no
-# in-memory state that could track "time since last sync" across a
-# deep-sleep restart in the first place.
+# separately, but for a different reason than there: the clock is taken from
+# the Date header of the proxy's own response on every fetch (see
+# parse_http_date), so it is re-established every cycle at no cost and
+# cannot drift between syncs. NTP is only a fallback for a device that has
+# no usable clock at all, which in practice means a cold boot.
 POLL_PERIOD_S        = 300    # 5 min: matches upstream CGM reading cadence
 ALARM_RECENCY_S      = 15*60  # only announce alarms newer than this
 
@@ -774,6 +775,55 @@ def local_now(timezone, dst_delta):
 #
 #################################################
 
+# Month names as an HTTP date spells them, three chars each, so a month can
+# be found by index without needing tuple.index() or a dict.
+_HTTP_MONTHS = "JanFebMarAprMayJunJulAugSepOctNovDec"
+
+
+def parse_http_date(header):
+   # "Date: Fri, 04 Sep 2026 06:14:14 GMT" -> epoch seconds UTC, or None.
+   #
+   # This is where the clock comes from now. RFC 7231 fixes the format and
+   # the proxy is a Python BaseHTTP server, which emits exactly it - but
+   # anything unexpected returns None rather than a guess, because a
+   # confidently wrong clock is far worse here than a missing one: it would
+   # silently corrupt "Updated N min ago", the one number that tells a
+   # caregiver whether to trust the reading on screen.
+   try:
+      for line in header.split(b"\r\n"):
+         if line[:5].lower() != b"date:":
+            continue
+         # ['Fri,', '04', 'Sep', '2026', '06:14:14', 'GMT']
+         parts = line[5:].strip().split()
+         if len(parts) < 6 or parts[5].upper() != b"GMT":
+            return None
+         month = _HTTP_MONTHS.find(parts[2].decode())
+         if month < 0:
+            return None
+         hh, mm, ss = [int(x) for x in parts[4].split(b":")]
+         # mktime() is the inverse of localtime(), and this port has no
+         # timezone support, so localtime is UTC and so is this. The
+         # display applies the timezone offset separately, in local_now().
+         return time.mktime((int(parts[3]), month // 3 + 1, int(parts[1]),
+                             hh, mm, ss, 0, 0))
+   except Exception as e:
+      print("Could not parse HTTP Date header: %s" % e)
+   return None
+
+
+def set_clock(epoch):
+   # Mirrors ntptime.settime(), including RTC.datetime()'s ISO weekday
+   # (1-7) where gmtime() hands back 0-6.
+   try:
+      tm = time.gmtime(epoch)
+      machine.RTC().datetime((tm[0], tm[1], tm[2], tm[6] + 1,
+                              tm[3], tm[4], tm[5], 0))
+      return True
+   except Exception as e:
+      print("Setting clock failed: %s" % e)
+      return False
+
+
 def http_get(host, port, path, timeout_s=30):
    addr = socket.getaddrinfo(host, port)[0][-1]
    s = socket.socket()
@@ -796,7 +846,9 @@ def http_get(host, port, path, timeout_s=30):
       status_code = int(header.split(b"\r\n", 1)[0].split()[1])
    except (IndexError, ValueError):
       status_code = 0
-   return status_code, body
+   # The Date header rides along with every response, so the clock is free
+   # here - no DNS, no extra round trip, no drift between syncs.
+   return status_code, body, parse_http_date(header)
 
 
 #################################################
@@ -1270,10 +1322,18 @@ def handle_pumpdataupdate(proxyaddr, proxyport, timezone):
    state = new_state()
 
    try:
-      status_code, body = http_get(proxyaddr, int(proxyport), API_URL)
+      status_code, body, server_epoch = http_get(proxyaddr, int(proxyport), API_URL)
    except (OSError, Exception) as e:
       print("Pump data fetch failed: %s" % e)
       return state
+
+   # Set the clock BEFORE parsing: the alarm logic below compares alarm
+   # times against now, and on a cold boot with no NTP this is the first
+   # correct clock the device has had.
+   if server_epoch:
+      drift = server_epoch - time.time()
+      if set_clock(server_epoch) and abs(drift) >= 2:
+         print("Clock corrected from proxy by %+d s" % drift)
 
    if status_code != 200:
       print("Pump data fetch returned status %s" % status_code)
@@ -2222,13 +2282,23 @@ def main():
          if not wlan.isconnected():
             print("WiFi unavailable this cycle, skipping fetch/draw, retrying next wake")
          else:
-            ntp_synced = False
-            for _ in range(10):
-               if ntp_sync(ntpserver):
-                  ntp_synced = True
-                  break
-               time.sleep_ms(1000)
-            print("NTP synced: %s" % ntp_synced)
+            # NTP is a fallback now, not part of every cycle. The proxy's
+            # own Date header sets the clock on every fetch (see
+            # parse_http_date), which costs nothing, needs no DNS and
+            # cannot drift between syncs. Sync here only when there is no
+            # usable clock at all - a cold boot starts at 1970 - because
+            # the retry loop below costs up to 10 SECONDS when it fails,
+            # and a network with a DNS blocker (this one) produces exactly
+            # that failure. Measured: a successful sync is 64ms, so this
+            # was never about saving time in the good case.
+            if time.time() < TIME_VALID_EPOCH:
+               ntp_synced = False
+               for _ in range(10):
+                  if ntp_sync(ntpserver):
+                     ntp_synced = True
+                     break
+                  time.sleep_ms(1000)
+               print("NTP synced: %s (fallback: no clock yet)" % ntp_synced)
             note_session_start()   # first valid clock since power-on starts it
 
             state = handle_pumpdataupdate(proxyaddr, proxyport, timezone)
