@@ -665,7 +665,8 @@ void setup() {
                          cause == ESP_SLEEP_WAKEUP_EXT1);
   bool cold_boot = (rtc.magic != RTC_MAGIC);
   if (cold_boot) {
-    rtc = RtcState{};
+    memset(&rtc, 0, sizeof(rtc));
+    state_init(rtc.snap);
     rtc.magic = RTC_MAGIC;
     rtc.screen = SCREEN_MAIN;
   }
@@ -673,6 +674,12 @@ void setup() {
   Serial.printf("\ncoreink: power hold at %lld us, reset %d, wake %d, cold %d, cycle %u\n",
                 power_hold_us, (int)esp_reset_reason(), (int)cause,
                 (int)cold_boot, rtc.cycle);
+  // What the toggle path would draw from. If this reads empty on a wake, the
+  // secondary screens show "--" and the cause is the snapshot, not the fetch.
+  Serial.printf("snapshot: sg=%d insulin=%.1f resv=%.1f sensor=%d batt=%d ip=%s\n",
+                rtc.snap.sg, rtc.snap.activeInsulin, rtc.snap.reservoirUnits,
+                rtc.snap.sageHours, rtc.snap.batteryPct,
+                rtc.snap.ip[0] ? rtc.snap.ip : "(none)");
 
   auto mcfg = M5.config();
   // TRUE, where main_m5coreink.py sets it False - and this is the single
@@ -740,14 +747,17 @@ void setup() {
     Serial.printf("wifi: failed after %lld ms, skipping cycle\n", wifi_ms);
     sleep_until(rtc.next_poll);
   }
-  Serial.printf("wifi: connected in %lld ms, ip %s\n",
-                wifi_ms, WiFi.localIP().toString().c_str());
+  // Captured NOW, while the radio is still up. Read after WiFi.mode(WIFI_OFF)
+  // it comes back 0.0.0.0, which is what the info screen was showing.
+  String local_ip = WiFi.localIP().toString();
+  Serial.printf("wifi: connected in %lld ms, ip %s\n", wifi_ms, local_ip.c_str());
 
 #if PORTAL_TEST
   run_config_portal_sta(cfg);   // blocks; reboots when a config is submitted
 #endif
 
   State s;
+  state_init(s);
   int64_t t_fetch = esp_timer_get_time();
   bool ok = fetch_pump_data(cfg, s);
   Serial.printf("fetch+parse: %lld ms, ok=%d\n",
@@ -806,7 +816,7 @@ void setup() {
       Serial.printf("alarm active, sounding buzzer: %s\n", s.alarm_text);
       beep();
     }
-    snprintf(s.ip, sizeof(s.ip), "%s", WiFi.localIP().toString().c_str());
+    snprintf(s.ip, sizeof(s.ip), "%s", local_ip.c_str());
     rtc.snap = s;
     // Anchor the cadence on the fetch, not on the wake, so the tail of the
     // cycle never shifts the schedule.

@@ -10,6 +10,8 @@
 
 #include <Arduino.h>
 #include <time.h>
+#include <string.h>
+#include <stdio.h>
 
 struct Config {
   String wifissid, wifipass, proxyaddr, ntpserver, patient;
@@ -20,25 +22,45 @@ struct Config {
 // Mirrors new_state() in main_m5coreink.py. Plain values only, so the whole
 // struct can later sit in RTC memory across a deep sleep without the JSON
 // round-trip the MicroPython build needs.
+// Deliberately a plain POD with NO default member initializers.
+//
+// This struct is stored in RTC memory across deep sleep. A member with an
+// NSDMI makes the enclosing struct non-trivially-constructible, and the
+// compiler then emits a dynamic initializer that runs at startup on EVERY
+// boot - including a deep-sleep wake. Observed exactly that: the RtcState
+// fields around it (magic, cycle, next_poll) persisted correctly while the
+// snapshot was silently re-initialised on every wake, so the secondary
+// screens always drew "--". Initialise with state_init() instead.
 struct State {
-  bool haveData = false;
-  int sg = 0;                    // mg/dL, 0 = no reading
-  char trend[16] = "NONE";
-  float activeInsulin = -1.0f;
-  int batteryPct = -1;
-  float reservoirUnits = -1.0f;
-  int reservoirPct = -1;
-  int sageHours = 255;           // 255 = the pump's "no sensor yet" sentinel
-  char sensorState[32] = "";
-  char patient[32] = "";
-  time_t lastUpdate = 0;         // epoch UTC of the reading itself
-  char banner[64] = "";
+  bool haveData;
+  int sg;                    // mg/dL, 0 = no reading
+  char trend[16];
+  float activeInsulin;
+  int batteryPct;
+  float reservoirUnits;
+  int reservoirPct;
+  int sageHours;             // 255 = the pump's "no sensor yet" sentinel
+  char sensorState[32];
+  char patient[32];
+  time_t lastUpdate;         // epoch UTC of the reading itself
+  char banner[64];
   // Alarm message, and the alarm's OWN occurrence time as LOCAL wall clock
-  // (not "now", and not UTC - see get_alarm_text()). Empty/0 = no alarm.
-  char alarm_text[80] = "";
-  time_t alarm_local = 0;
-  char ip[16] = "";
-  int dstDelta = 0;
+  // (not "now", and not UTC - see resolve_alarm()). Empty/0 = no alarm.
+  char alarm_text[80];
+  time_t alarm_local;
+  char ip[16];
+  int dstDelta;
   // 24h distribution, for the stats screen
-  int timeInRange = -1, aboveHyper = -1, belowHypo = -1, averageSG = -1;
+  int timeInRange, aboveHyper, belowHypo, averageSG;
 };
+
+inline void state_init(State &s) {
+  memset(&s, 0, sizeof(s));
+  snprintf(s.trend, sizeof(s.trend), "NONE");
+  s.activeInsulin = -1.0f;
+  s.batteryPct = -1;
+  s.reservoirUnits = -1.0f;
+  s.reservoirPct = -1;
+  s.sageHours = 255;
+  s.timeInRange = s.aboveHyper = s.belowHypo = s.averageSG = -1;
+}
