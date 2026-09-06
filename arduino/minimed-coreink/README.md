@@ -5,6 +5,9 @@ the reference implementation and stays deployed on the second Core Ink until
 this reaches parity; board-independent logic is duplicated across the two,
 not shared.
 
+How the port is put together — the entry point, the files, the cycle — is in
+[architecture.md](architecture.md).
+
 **Read `../../PORTING-M5COREINK.md` first.** Its hardware facts are
 language-independent — the power latch, the panel's refresh behaviour, the
 toggle wake rules, the epoch, the UIFlow `boot.py` trap — and this port
