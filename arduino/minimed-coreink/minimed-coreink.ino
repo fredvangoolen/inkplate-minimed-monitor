@@ -360,13 +360,13 @@ static void dump_canvas_ascii(M5Canvas &canvas) {
 // drawing call, so a screen built from a few dozen primitives triggers a few
 // dozen panel updates. Measured on the MicroPython build, drawing straight
 // to the panel took 7.7s for this screen against ~30ms composed.
-static void compose(const State &s, const Config &c, bool full_refresh) {
+static void compose(int screen, const State &s, const Config &c, bool full_refresh) {
   M5.Display.setEpdMode(full_refresh ? epd_mode_t::epd_quality
                                      : epd_mode_t::epd_fast);
   M5Canvas canvas(&M5.Display);
   canvas.setColorDepth(CANVAS_BPP);
   if (canvas.createSprite(PANEL_W, PANEL_H)) {
-    draw_main_screen(canvas, s, c);
+    draw_current_screen(canvas, screen, s, c);
 #if DEBUG_ASCII
     dump_font_metrics(canvas);
     dump_canvas_ascii(canvas);
@@ -377,20 +377,184 @@ static void compose(const State &s, const Config &c, bool full_refresh) {
     // Should not happen here - this build has ~275KB free where MicroPython
     // had a ~55KB largest block - but a slow screen beats a blank one.
     Serial.println("canvas allocation failed, drawing direct");
-    draw_main_screen(M5.Display, s, c);
+    draw_current_screen(M5.Display, screen, s, c);
   }
 }
 
+// ---------------------------------------------------------------- toggle
+//
+// Three-position switch: G37 up, G39 down, G38 press (unused). Both
+// directions advance a screen, which needs BOTH of the ESP32's GPIO wake
+// sources - ext0 takes a single pin, ext1 a mask, and one alone cannot cover
+// two pins that must each wake on a low level.
+
+static const gpio_num_t BTN_UP_PIN   = GPIO_NUM_37;
+static const gpio_num_t BTN_DOWN_PIN = GPIO_NUM_39;
+
+// How long to stay awake after a press, watching for another. Waking costs
+// ~1.2s of boot before any of this runs, so a run of flicks should redraw at
+// panel speed rather than pay that each time. 15s is really "how long may
+// someone think before the device gives up on them".
+static const uint32_t TOGGLE_AWAKE_MS = 15000;
+
+// There is deliberately NO equivalent window after a scheduled refresh. A
+// poll runs ~283 times a day whether or not anybody is there; measured on
+// the MicroPython build, such a window was over half the awake time in every
+// cycle. Nothing is lost but latency on the first flick after a refresh,
+// because the toggle still wakes the board out of deep sleep.
+
+// Bounds that exist purely so no switch fault can keep the device awake. A
+// held, wedged or chattering contact must degrade to "the screens stop
+// responding until the next scheduled wake", never to "the monitor stops
+// polling", which is indistinguishable from a dead device.
+static const uint32_t TOGGLE_SESSION_MAX_MS = 180000;
+static const uint32_t TOGGLE_RELEASE_MAX_MS = 3000;
+static const uint32_t TOGGLE_DEBOUNCE_MS    = 120;
+
+// Presses are latched by an interrupt rather than discovered by polling: a
+// panel redraw blocks for a noticeable fraction of a second, and a flick
+// that landed during one would simply be lost - the device feeling like it
+// ignores the switch exactly when someone is clicking through it fastest.
+static volatile bool toggle_latch = false;
+
+static void IRAM_ATTR toggle_isr() { toggle_latch = true; }
+
+static void install_toggle_irq() {
+  pinMode(BTN_UP_PIN, INPUT);
+  pinMode(BTN_DOWN_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(BTN_UP_PIN), toggle_isr, FALLING);
+  attachInterrupt(digitalPinToInterrupt(BTN_DOWN_PIN), toggle_isr, FALLING);
+}
+
+// Active low; every pin reads 1 at rest, confirmed by probing.
+static bool toggle_pressed() {
+  return digitalRead(BTN_UP_PIN) == LOW || digitalRead(BTN_DOWN_PIN) == LOW;
+}
+
+// True if the switch has been operated since the last call, held or not.
+static bool toggle_take() {
+  if (!toggle_latch) return false;
+  toggle_latch = false;
+  return true;
+}
+
+static void arm_toggle_wake() {
+  // A pin that is ALREADY low must not be armed. These wake sources are
+  // level-triggered, not edge-triggered, so arming a pin held down makes
+  // deep sleep return immediately, every time: the device would spin through
+  // wake/redraw/sleep as fast as it can boot, never reaching its next poll
+  // and flattening the battery in hours. That is what a switch resting
+  // off-centre, or a contact failed to ground, looks like. Skipping the
+  // stuck pin costs that one direction until it is released; the other
+  // direction and the timer keep working.
+  if (digitalRead(BTN_UP_PIN) == HIGH) {
+    esp_sleep_enable_ext0_wakeup(BTN_UP_PIN, 0);
+  } else {
+    Serial.printf("GPIO%d held low, not arming ext0\n", (int)BTN_UP_PIN);
+  }
+  if (digitalRead(BTN_DOWN_PIN) == HIGH) {
+    esp_sleep_enable_ext1_wakeup(1ULL << BTN_DOWN_PIN, ESP_EXT1_WAKEUP_ALL_LOW);
+  } else {
+    Serial.printf("GPIO%d held low, not arming ext1\n", (int)BTN_DOWN_PIN);
+  }
+}
+
+// ------------------------------------------------------------- rtc state
+//
+// RTC_DATA_ATTR survives deep sleep and is re-initialised on every other
+// reset - which is exactly the semantics wanted here, and the same as the
+// MicroPython build's RTC memory: a cold boot must start with no snapshot
+// rather than a stale one. (It is NOT the place for anything that has to
+// outlive a crash; see the reboot counter in the phase 0 notes.)
+//
+// A plain struct, where MicroPython had to serialise JSON in and out of RTC
+// memory and re-hydrate it - about 120 lines that simply do not exist here.
+#define RTC_MAGIC 0x4D4D0301u   // bump when the layout changes
+
+struct RtcState {
+  uint32_t magic;
+  int      screen;
+  time_t   next_poll;
+  time_t   session_start;   // for the runtime counter on the info screen
+  uint32_t cycle;
+  State    snap;
+};
+
+RTC_DATA_ATTR RtcState rtc;
+
+// How often a scheduled refresh uses the slow full-clear waveform. The flash
+// is not required on every wake - the fast waveform writes the same image -
+// but ghosting is: fast waveforms leave a residue that accumulates into a
+// permanent shadow on a display redrawing the same shapes all day. At one
+// poll per 5 minutes, 12 cycles is roughly hourly.
+static const uint32_t FULL_REFRESH_EVERY = 12;
+
 // -------------------------------------------------------------------- main
 
-static void sleep_now(uint32_t seconds) {
+static void sleep_until(time_t next_poll) {
+  // Sleep only until the next poll is actually due, rather than a fresh full
+  // period. Without this every toggle press would push the next reading out
+  // by another 5 minutes, so someone idly flicking through the screens could
+  // starve the data this device exists to show.
+  int32_t remaining = POLL_PERIOD_S;
+  if (next_poll) remaining = (int32_t)(next_poll - time(nullptr));
+  if (remaining < 5) remaining = 5;
+  else if (remaining > (int32_t)POLL_PERIOD_S) remaining = POLL_PERIOD_S;
+
+  arm_toggle_wake();
+  // Panel down, pads latched, then sleep - the order matters; see
+  // PORTING-M5COREINK.md.
   M5.Display.powerSaveOn();
   gpio_hold_en(POWER_HOLD_PIN);
   gpio_deep_sleep_hold_en();
-  Serial.printf("sleeping %u s (awake %d ms)\n",
-                seconds, (int)(esp_timer_get_time() / 1000));
+  Serial.printf("sleeping %d s (awake %d ms)\n",
+                (int)remaining, (int)(esp_timer_get_time() / 1000));
   Serial.flush();
-  esp_deep_sleep((uint64_t)seconds * 1000000ULL);
+  esp_deep_sleep((uint64_t)remaining * 1000000ULL);
+}
+
+// Returns the screen left on display. Each press advances one screen and
+// restarts the window, so a conversation with the device never drops back to
+// sleep mid-flick.
+static int run_toggle_session(int screen, const State &s, const Config &c) {
+  install_toggle_irq();
+  toggle_take();   // discard the press that woke us; already accounted for
+  uint32_t deadline  = millis() + TOGGLE_AWAKE_MS;
+  uint32_t hard_stop = millis() + TOGGLE_SESSION_MAX_MS;
+
+  while ((int32_t)(deadline - millis()) > 0 &&
+         (int32_t)(hard_stop - millis()) > 0) {
+    if (toggle_take() || toggle_pressed()) {
+      screen = (screen + 1) % SCREEN_COUNT;
+
+      // Wait for release BEFORE drawing, so holding the switch does not
+      // queue a second advance. BOUNDED: a stuck-low pin must not park the
+      // device here forever.
+      uint32_t release_by = millis() + TOGGLE_RELEASE_MAX_MS;
+      while (toggle_pressed() && (int32_t)(release_by - millis()) > 0) delay(10);
+      toggle_take();
+
+      compose(screen, s, c, false);
+
+      // Settle time: these contacts bounce, and without it one physical
+      // flick can register several times and race through the screens.
+      delay(TOGGLE_DEBOUNCE_MS);
+      toggle_take();
+
+      if (toggle_pressed()) {
+        // Still down: held, resting off-centre, or a failed contact.
+        // Advancing on a level rather than an edge would spin through the
+        // screens for as long as it stays there, so end the session.
+        // arm_toggle_wake() will also decline to arm this pin.
+        Serial.printf("toggle still held after %u ms - ending session\n",
+                      TOGGLE_RELEASE_MAX_MS);
+        break;
+      }
+      deadline = millis() + TOGGLE_AWAKE_MS;
+    }
+    delay(10);
+  }
+  return screen;
 }
 
 void setup() {
@@ -398,12 +562,23 @@ void setup() {
   Serial.begin(115200);
 
   // Pin the runtime to UTC so mktime()/localtime() are UTC conversions; the
-  // configured offset is applied only when drawing, exactly as main.py does.
+  // configured offset is applied only when drawing, as main.py does.
   setenv("TZ", "UTC0", 1);
   tzset();
 
-  Serial.printf("\ncoreink: power hold asserted at %lld us app-time, reset reason %d\n",
-                power_hold_us, (int)esp_reset_reason());
+  esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+  bool woke_on_toggle = (cause == ESP_SLEEP_WAKEUP_EXT0 ||
+                         cause == ESP_SLEEP_WAKEUP_EXT1);
+  bool cold_boot = (rtc.magic != RTC_MAGIC);
+  if (cold_boot) {
+    rtc = RtcState{};
+    rtc.magic = RTC_MAGIC;
+    rtc.screen = SCREEN_MAIN;
+  }
+
+  Serial.printf("\ncoreink: power hold at %lld us, reset %d, wake %d, cold %d, cycle %u\n",
+                power_hold_us, (int)esp_reset_reason(), (int)cause,
+                (int)cold_boot, rtc.cycle);
 
   auto mcfg = M5.config();
   mcfg.clear_display = false;
@@ -413,11 +588,24 @@ void setup() {
   Config cfg;
   if (!config_read(cfg)) {
     Serial.println("config incomplete - AP setup is phase 5, halting here");
-    sleep_now(POLL_PERIOD_S);
+    sleep_until(0);
   }
-  Serial.printf("config: ssid %s proxy %s:%u tz %d patient '%s'\n",
-                cfg.wifissid.c_str(), cfg.proxyaddr.c_str(), cfg.proxyport,
-                cfg.timezone, cfg.patient.c_str());
+
+  // --- Toggle wake: redraw from the cached snapshot and go back to sleep.
+  // Deliberately does NOT touch the network. Bringing up WiFi and fetching
+  // would add seconds between the flick and the screen changing, and none of
+  // the screens gains from data a few minutes fresher; the scheduled poll is
+  // what keeps it current.
+  if (woke_on_toggle && !cold_boot) {
+    rtc.screen = (rtc.screen + 1) % SCREEN_COUNT;
+    compose(rtc.screen, rtc.snap, cfg, false);
+    rtc.screen = run_toggle_session(rtc.screen, rtc.snap, cfg);
+    sleep_until(rtc.next_poll);   // does not return
+  }
+
+  // --- Scheduled poll. Always returns to the main screen: it is the view
+  // this device exists for, and the only one that shows the alarm banner.
+  rtc.screen = SCREEN_MAIN;
 
   int64_t t_wifi = esp_timer_get_time();
   WiFi.mode(WIFI_STA);
@@ -427,8 +615,10 @@ void setup() {
   int64_t wifi_ms = (esp_timer_get_time() - t_wifi) / 1000;
 
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.printf("wifi: failed after %lld ms, skipping this cycle\n", wifi_ms);
-    sleep_now(POLL_PERIOD_S);
+    // A transient WiFi failure skips this cycle rather than being fatal; the
+    // next wake tries again.
+    Serial.printf("wifi: failed after %lld ms, skipping cycle\n", wifi_ms);
+    sleep_until(rtc.next_poll);
   }
   Serial.printf("wifi: connected in %lld ms, ip %s\n",
                 wifi_ms, WiFi.localIP().toString().c_str());
@@ -436,30 +626,31 @@ void setup() {
   State s;
   int64_t t_fetch = esp_timer_get_time();
   bool ok = fetch_pump_data(cfg, s);
-  int64_t fetch_ms = (esp_timer_get_time() - t_fetch) / 1000;
-  Serial.printf("fetch+parse: %lld ms, ok=%d\n", fetch_ms, (int)ok);
+  Serial.printf("fetch+parse: %lld ms, ok=%d\n",
+                (esp_timer_get_time() - t_fetch) / 1000, (int)ok);
 
   // The radio holds heap the canvas wants and costs current; down it goes
-  // before drawing, same as the MicroPython build.
+  // before drawing.
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
 
-#if LAYOUT_TEST
-  // Synthetic: a normal in-range reading with a rising trend, so the large
-  // figure, the arrows and both bottom rows are all exercised.
-  s.sg = 160; strlcpy(s.trend, "UP_DOUBLE", sizeof(s.trend));
-  s.activeInsulin = 0.4f;
-  s.lastUpdate = time(nullptr) - 4 * 60;
-  s.dstDelta = 1;
-  Serial.println("LAYOUT_TEST: state overridden");
-#endif
-  if (ok) dump_state(s, cfg);
-  int64_t t_draw = esp_timer_get_time();
-  compose(s, cfg, true);   // phase 2: always full refresh; scheduling is phase 3
-  Serial.printf("draw: %lld ms\n", (esp_timer_get_time() - t_draw) / 1000);
-  Serial.printf("drawn at %d ms\n", (int)(esp_timer_get_time() / 1000));
+  if (ok) {
+    dump_state(s, cfg);
+    rtc.snap = s;
+    // Anchor the cadence on the fetch, not on the wake, so the tail of the
+    // cycle never shifts the schedule.
+    rtc.next_poll = time(nullptr) + POLL_PERIOD_S;
+    if (!rtc.session_start && time(nullptr) > TIME_VALID_EPOCH) {
+      rtc.session_start = time(nullptr);
+    }
+  }
 
-  sleep_now(POLL_PERIOD_S);
+  // Tested before the increment so cycle 0 - the first draw after a cold
+  // boot, which has the splash still on the panel to clear - is a full one.
+  compose(SCREEN_MAIN, rtc.snap, cfg, (rtc.cycle % FULL_REFRESH_EVERY) == 0);
+  rtc.cycle++;
+
+  sleep_until(rtc.next_poll);
 }
 
 void loop() {

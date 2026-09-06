@@ -17,8 +17,8 @@ depends on every one of them.
 | 0 | toolchain, splash, power-hold gate | done |
 | 1 | config, WiFi, fetch, clock, parse | done |
 | 2 | main screen | done |
-| 3 | deep sleep, RTC state, toggle | next |
-| 4 | remaining screens, fault tables, alarms | |
+| 3 | deep sleep, RTC state, toggle | done (toggle unverified on hardware) |
+| 4 | remaining screens, fault tables, alarms | next |
 | 5 | AP config portal | |
 | 6 | soak and cutover | |
 
@@ -92,7 +92,9 @@ Against the MicroPython build running the same cycle on the same hardware:
 |---|---|---|
 | WiFi association | 2081 ms | 1178 ms |
 | fetch + parse | 79 ms | 102 ms |
-| awake per cycle | 5260 ms | **2026 ms** |
+| awake per cycle, cold boot | 5260 ms | 2344 ms |
+| awake per cycle, timer wake | 5260 ms | **1963 ms** |
+| awake per day | ~25 min | **~9 min** |
 | free RAM | ~55 KB largest block | 275 KB |
 | image size | 3.4 MB | 1.16 MB |
 

@@ -41,4 +41,11 @@ static const int HYPO_THRESHOLD_MGDL  = 70;
 // panel) and M5Canvas (the off-screen sprite), so the composed and direct
 // paths cannot diverge - the same reason the MicroPython build funnels
 // everything through gfx().
+// Screen order, cycled endlessly by the toggle in either direction. Pump
+// sits between the glucose stats and the technical screen, as in the
+// MicroPython build.
+enum { SCREEN_MAIN = 0, SCREEN_STATS = 1, SCREEN_PUMP = 2, SCREEN_INFO = 3,
+       SCREEN_COUNT = 4 };
+
 void draw_main_screen(LovyanGFX &g, const State &s, const Config &c);
+void draw_current_screen(LovyanGFX &g, int screen, const State &s, const Config &c);

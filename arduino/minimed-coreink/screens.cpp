@@ -325,3 +325,35 @@ void draw_main_screen(LovyanGFX &g, const State &s, const Config &c) {
     }
   }
 }
+
+// ------------------------------------------------------- secondary screens
+
+// Shared chrome for the secondary screens. The main screen has no header on
+// purpose: there every pixel of the top band belongs to the glucose figure,
+// and a caregiver glancing over should recognise that view instantly rather
+// than read a label to find out which screen is up.
+static int draw_screen_header(LovyanGFX &g, const char *title) {
+  draw_text(g, title, MARGIN, 4, FONT_LABEL, COLOR_BLACK);
+  int y = 4 + font_height(g, FONT_LABEL) + 3;
+  g.drawLine(MARGIN, y, PANEL_W - MARGIN, y, COLOR_BLACK);
+  return y + 7;
+}
+
+// Phase 4 fills these in. They exist now so the toggle can be exercised
+// end-to-end in phase 3 - a screen cycle with only one screen in it proves
+// nothing.
+static void draw_placeholder(LovyanGFX &g, const char *title) {
+  g.fillScreen(COLOR_WHITE);
+  int y = draw_screen_header(g, title);
+  draw_text(g, "not ported yet", MARGIN, y + 10, FONT_LABEL, COLOR_BLACK);
+  draw_text(g, "(phase 4)", MARGIN, y + 30, FONT_LABEL, COLOR_BLACK);
+}
+
+void draw_current_screen(LovyanGFX &g, int screen, const State &s, const Config &c) {
+  switch (screen) {
+    case SCREEN_STATS: draw_placeholder(g, "GLUCOSE, LAST 24 H"); break;
+    case SCREEN_PUMP:  draw_placeholder(g, "PUMP & SENSOR");      break;
+    case SCREEN_INFO:  draw_placeholder(g, "DEVICE & NETWORK");   break;
+    default:           draw_main_screen(g, s, c);                 break;
+  }
+}
