@@ -6,9 +6,9 @@
 // wake behaviour. Nothing here is a guess; every constant with a number in
 // it was measured on this board.
 //
-// PHASE 1: config, WiFi, fetch, clock, parse. No display yet beyond the
-// splash. The state struct is dumped to serial so it can be compared
-// field-by-field against the MicroPython board fetching the same proxy.
+// PHASES 0-2: power hold, config, WiFi, fetch, clock, parse, and the main
+// screen. Still to come: deep-sleep scheduling and the toggle (3), the other
+// three screens and alarms (4), the AP config portal (5).
 //
 // The power-hold gate (see below) is settled: verified on battery that a
 // software reset recovers by itself, so a crash at 3am does not leave a
@@ -23,18 +23,13 @@
 #include "esp_timer.h"
 #include "esp_sleep.h"
 #include "types.h"
+#include "screens.h"
 
 #define VERSION "0.1-arduino"
 
 // ---------------------------------------------------------------- hardware
 
 static const gpio_num_t POWER_HOLD_PIN = GPIO_NUM_12;
-
-static const int PANEL_W = 200;
-static const int PANEL_H = 200;
-// Panel is 1bpp but M5GFX wants a greyscale sprite; matches CANVAS_BPP in
-// the MicroPython build.
-static const int CANVAS_BPP = 4;
 
 // The board's 3.3V rail is latched on by GPIO12. Out of reset that pad is an
 // input, and the rail coasts only briefly with it floating - so whoever
@@ -247,6 +242,18 @@ static bool fetch_pump_data(const Config &c, State &s) {
   const char *tzname = doc["clientTimeZoneName"] | "";
   s.dstDelta = strcasestr(tzname, "summer") ? 1 : 0;
 
+  // systemStatusMessage is the generic line; a pump delivery banner
+  // (suspend / bg-required / etc.) overrides it when both are set.
+  const char *sysmsg = doc["systemStatusMessage"] | "";
+  if (sysmsg[0] && strcmp(sysmsg, "NO_ERROR_MESSAGE") != 0) {
+    strlcpy(s.banner, sysmsg, sizeof(s.banner));
+  }
+  const char *pump_banner = doc["pumpBannerState"][0]["type"] | "";
+  if (pump_banner[0]) {
+    strlcpy(s.banner, pump_banner, sizeof(s.banner));
+  }
+  for (char *p = s.banner; *p; p++) if (*p == '_') *p = ' ';
+
   s.timeInRange = doc["timeInRange"]      | -1;
   s.aboveHyper  = doc["aboveHyperLimit"]  | -1;
   s.belowHypo   = doc["belowHypoLimit"]   | -1;
@@ -271,6 +278,7 @@ static void dump_state(const State &s, const Config &c) {
   Serial.printf("  pump battery  %d%%\n", s.batteryPct);
   Serial.printf("  patient       %s (config: %s)\n", s.patient, c.patient.c_str());
   Serial.printf("  lastUpdate    %s UTC\n", when);
+  Serial.printf("  banner        '%s'\n", s.banner);
   Serial.printf("  dstDelta      %d\n", s.dstDelta);
   Serial.printf("  stats         inRange %d  above %d  below %d  avgSG %d\n",
                 s.timeInRange, s.aboveHyper, s.belowHypo, s.averageSG);
@@ -279,31 +287,98 @@ static void dump_state(const State &s, const Config &c) {
 
 // ----------------------------------------------------------------- display
 
-static void draw_phase1(const State &s, const Config &c) {
-  M5.Display.setEpdMode(epd_mode_t::epd_fast);
+// 1 = overwrite the fetched state with synthetic values, to exercise the
+// layout deterministically instead of waiting on whatever the pump happens
+// to be doing. Leave at 0 for real use.
+#define LAYOUT_TEST 0
+
+// 1 = dump the composed canvas to serial as ASCII, 4x4 pixels per character.
+// This board has no REPL and no screenshots, so without it the only way to
+// check a layout is to ask a human to look at the panel. Costs nothing when
+// off.
+#define DEBUG_ASCII 0
+
+#if DEBUG_ASCII
+// The MicroPython build's layout constants were tuned against ITS font
+// metrics, recorded in comments there (DejaVu72 50px, DejaVu24 26px,
+// DejaVu18 20px, DejaVu12 16px, DejaVu40 at 2x measuring 86px tall and 140px
+// wide for three digits). If M5GFX reports different numbers to C++, every
+// screen coordinate derived from them moves.
+static void dump_font_metrics(M5Canvas &c) {
+  struct { const char *name; const lgfx::IFont *f; float size; } fs[] = {
+    {"DejaVu72   ", &fonts::DejaVu72, 1.0f},
+    {"DejaVu40x2 ", &fonts::DejaVu40, 2.0f},
+    {"DejaVu24   ", &fonts::DejaVu24, 1.0f},
+    {"DejaVu18   ", &fonts::DejaVu18, 1.0f},
+    {"DejaVu12   ", &fonts::DejaVu12, 1.0f},
+  };
+  Serial.println("---- font metrics ----");
+  for (auto &e : fs) {
+    c.setFont(e.f);
+    c.setTextSize(e.size);
+    Serial.printf("  %s height %3d   w(\"160\") %3d   w(\"Suspend\") %3d\n",
+                  e.name, c.fontHeight(), c.textWidth("160"), c.textWidth("Suspend"));
+  }
+  c.setTextSize(1.0f);
+  Serial.println("----------------------");
+}
+
+static void dump_canvas_ascii(M5Canvas &canvas) {
+  Serial.println("---- canvas 200x200, 4x4 px per char ----");
+  for (int y = 0; y < PANEL_H; y += 4) {
+    char row[PANEL_W / 4 + 1];
+    int n = 0;
+    for (int x = 0; x < PANEL_W; x += 4) {
+      // 4bpp greyscale: 0 is black, 15 white. MAJORITY of the 4x4 block, not
+      // "any dark pixel": on a reverse-video bar every block contains black,
+      // so an any-dark rule renders the whole bar solid and hides the white
+      // text inside it - which had me hunting a drawing bug that was really
+      // a bug in this dump.
+      int dark = 0;
+      for (int dy = 0; dy < 4; dy++)
+        for (int dx = 0; dx < 4; dx++)
+          if (canvas.readPixel(x + dx, y + dy) < 8) dark++;
+      row[n++] = (dark >= 8) ? '#' : '.';
+    }
+    row[n] = 0;
+    Serial.println(row);
+  }
+  Serial.println("----------------------------------------");
+  // Per-row white-pixel counts for the bottom strip. ASCII thresholding is
+  // hopeless for 1-2px strokes on a reverse-video bar; a count is not.
+  Serial.println("bottom strip, white px per row:");
+  for (int y = PANEL_H - 40; y < PANEL_H; y++) {
+    int white = 0;
+    for (int x = 0; x < PANEL_W; x++) if (canvas.readPixel(x, y) >= 8) white++;
+    Serial.printf("  y=%3d  %3d\n", y, white);
+  }
+}
+#endif
+
+// Every screen is composed off-screen and pushed in ONE operation. This is
+// not an optimisation: M5GFX drives this e-paper panel on each individual
+// drawing call, so a screen built from a few dozen primitives triggers a few
+// dozen panel updates. Measured on the MicroPython build, drawing straight
+// to the panel took 7.7s for this screen against ~30ms composed.
+static void compose(const State &s, const Config &c, bool full_refresh) {
+  M5.Display.setEpdMode(full_refresh ? epd_mode_t::epd_quality
+                                     : epd_mode_t::epd_fast);
   M5Canvas canvas(&M5.Display);
   canvas.setColorDepth(CANVAS_BPP);
-  if (!canvas.createSprite(PANEL_W, PANEL_H)) {
-    Serial.println("canvas allocation failed");
-    return;
+  if (canvas.createSprite(PANEL_W, PANEL_H)) {
+    draw_main_screen(canvas, s, c);
+#if DEBUG_ASCII
+    dump_font_metrics(canvas);
+    dump_canvas_ascii(canvas);
+#endif
+    canvas.pushSprite(0, 0);
+    canvas.deleteSprite();
+  } else {
+    // Should not happen here - this build has ~275KB free where MicroPython
+    // had a ~55KB largest block - but a slow screen beats a blank one.
+    Serial.println("canvas allocation failed, drawing direct");
+    draw_main_screen(M5.Display, s, c);
   }
-  canvas.fillScreen(TFT_WHITE);
-  canvas.setTextColor(TFT_BLACK, TFT_WHITE);
-  canvas.setFont(&fonts::DejaVu12);
-  canvas.drawString("arduino v" VERSION, 6, 6);
-  canvas.setFont(&fonts::DejaVu72);
-  char line[48];
-  snprintf(line, sizeof(line), "%d", s.sg);
-  canvas.drawString(s.sg ? line : "--", 6, 40);
-  canvas.setFont(&fonts::DejaVu18);
-  canvas.drawString("mg/dL", 6, 110);
-  canvas.setFont(&fonts::DejaVu12);
-  snprintf(line, sizeof(line), "insulin %.1f U", s.activeInsulin);
-  canvas.drawString(line, 6, 150);
-  snprintf(line, sizeof(line), "phase 1: data path");
-  canvas.drawString(line, 6, 172);
-  canvas.pushSprite(0, 0);
-  canvas.deleteSprite();
 }
 
 // -------------------------------------------------------------------- main
@@ -369,8 +444,19 @@ void setup() {
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
 
+#if LAYOUT_TEST
+  // Synthetic: a normal in-range reading with a rising trend, so the large
+  // figure, the arrows and both bottom rows are all exercised.
+  s.sg = 160; strlcpy(s.trend, "UP_DOUBLE", sizeof(s.trend));
+  s.activeInsulin = 0.4f;
+  s.lastUpdate = time(nullptr) - 4 * 60;
+  s.dstDelta = 1;
+  Serial.println("LAYOUT_TEST: state overridden");
+#endif
   if (ok) dump_state(s, cfg);
-  draw_phase1(s, cfg);
+  int64_t t_draw = esp_timer_get_time();
+  compose(s, cfg, true);   // phase 2: always full refresh; scheduling is phase 3
+  Serial.printf("draw: %lld ms\n", (esp_timer_get_time() - t_draw) / 1000);
   Serial.printf("drawn at %d ms\n", (int)(esp_timer_get_time() / 1000));
 
   sleep_now(POLL_PERIOD_S);

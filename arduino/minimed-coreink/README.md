@@ -16,8 +16,8 @@ depends on every one of them.
 |---|---|---|
 | 0 | toolchain, splash, power-hold gate | done |
 | 1 | config, WiFi, fetch, clock, parse | done |
-| 2 | main screen | next |
-| 3 | deep sleep, RTC state, toggle | |
+| 2 | main screen | done |
+| 3 | deep sleep, RTC state, toggle | next |
 | 4 | remaining screens, fault tables, alarms | |
 | 5 | AP config portal | |
 | 6 | soak and cutover | |
@@ -62,6 +62,27 @@ esptool --chip esp32 --port /dev/ttyACM0 write-flash 0x9000 /tmp/nvs.bin
 
 `patient` is optional — the proxy reports `firstName`, so a device never told
 a name still shows the right one; the setting only overrides it.
+
+## Font metrics differ from the MicroPython build
+
+M5GFX reports different metrics to C++ than through its MicroPython binding,
+so **layout constants cannot be copied between the two builds**:
+
+| font | Python's comments | C++ measured |
+|---|---|---|
+| DejaVu72 | 50 px | 75 px |
+| DejaVu40 x2 | 86 px tall, 140 wide | 84 tall, 156 wide |
+| DejaVu24 | 26 px | 25 px |
+| DejaVu18 | 20 px | 18 px |
+| DejaVu12 | 16 px | 13 px |
+
+The Python file chose DejaVu40-at-2x for the large reading precisely because
+its DejaVu72 measured only 50 px. Here DejaVu72 is taller *and* 15 px
+narrower, so the port uses it instead: with DejaVu40-at-2x the trend arrows
+shrink to 10 px against the 17 px DejaVu72 leaves them, and the arrows are
+what turn a number into a direction. Both builds compute their geometry from
+`fontHeight()`/`textWidth()` at runtime, so each is internally consistent -
+they simply do not produce identical panels.
 
 ## Measured on this board
 
