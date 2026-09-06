@@ -485,9 +485,14 @@ RTC_DATA_ATTR RtcState rtc;
 // How often a scheduled refresh uses the slow full-clear waveform. The flash
 // is not required on every wake - the fast waveform writes the same image -
 // but ghosting is: fast waveforms leave a residue that accumulates into a
-// permanent shadow on a display redrawing the same shapes all day. At one
-// poll per 5 minutes, 12 cycles is roughly hourly.
-static const uint32_t FULL_REFRESH_EVERY = 12;
+// permanent shadow on a display redrawing the same shapes all day.
+//
+// EVERY scheduled draw, not every 12th as in the MicroPython build. That
+// build could afford 12 because UIFlow's firmware reset and cleared the
+// panel on every wake anyway; without that free clear, 11 consecutive fast
+// refreshes plus any toggle redraws ghost the panel badly. Measured cost of
+// the quality waveform: ~360ms against ~180ms for fast, once per 5 minutes.
+static const uint32_t FULL_REFRESH_EVERY = 1;
 
 // -------------------------------------------------------------------- main
 
@@ -581,7 +586,29 @@ void setup() {
                 (int)cold_boot, rtc.cycle);
 
   auto mcfg = M5.config();
-  mcfg.clear_display = false;
+  // TRUE, where main_m5coreink.py sets it False - and this is the single
+  // biggest behavioural difference the port turned up.
+  //
+  // Under UIFlow, the FIRMWARE ran its own M5.begin() with default config on
+  // every boot, so the panel was reset and re-initialised each wake for
+  // free; the app's False only suppressed a second, redundant clear. Here
+  // this is the only M5.begin() there is.
+  //
+  // The flag does NOT control the panel reset or init - those happen either
+  // way; in M5Unified it gates exactly one thing, Display.clear(). What that
+  // buys is a known starting image: the whole panel driven white through a
+  // full waveform, which scrubs residue and leaves the controller's old-image
+  // buffer (0x10) matching what is physically on the glass, so the next draw
+  // transitions cleanly from white.
+  //
+  // Without it, residue accumulates until a changed screen is unreadable.
+  // Waveform choice does not substitute: tried on hardware, both the quality
+  // two-pass on every draw and a black/white conditioning flush on cold boot,
+  // and the panel stayed ghosted. Only the per-wake clear fixed it.
+  //
+  // Costs ~1.9s per wake (measured 2.35s -> 4.27s). Still well under the
+  // MicroPython build's 5.26s, and correctness first.
+  mcfg.clear_display = true;
   M5.begin(mcfg);
   M5.Display.powerSaveOff();
 

@@ -84,6 +84,27 @@ what turn a number into a direction. Both builds compute their geometry from
 `fontHeight()`/`textWidth()` at runtime, so each is internally consistent -
 they simply do not produce identical panels.
 
+## The panel needs a clear on every wake
+
+`M5.begin()`'s `clear_display` gates exactly one thing — `Display.clear()` —
+and the port needs it **true**, where `main_m5coreink.py` sets it false.
+
+Under UIFlow the firmware ran its own `M5.begin()` with default config on
+every boot, so the panel was cleared each wake regardless; the app's `false`
+only suppressed a second, redundant clear. Here the sketch's `M5.begin()` is
+the only one, so `false` means the panel is never cleared and residue
+accumulates until a changed screen cannot be read.
+
+Waveform choice is not a substitute. Both the quality two-pass on every draw
+and a black/white conditioning flush on cold boot were tried on hardware and
+neither helped; only the per-wake clear did. It costs ~1.9 s (2.35 s -> 4.28 s
+per cycle), which is worth paying and still under MicroPython's 5.26 s.
+
+This is the sharpest example so far of why the two builds cannot share
+reasoning: `clear_display: False` and `FULL_REFRESH_EVERY = 12` are both
+correct in the Python file and both wrong here, for a reason that lives in
+the firmware rather than in either file.
+
 ## Measured on this board
 
 Against the MicroPython build running the same cycle on the same hardware:
@@ -92,9 +113,10 @@ Against the MicroPython build running the same cycle on the same hardware:
 |---|---|---|
 | WiFi association | 2081 ms | 1178 ms |
 | fetch + parse | 79 ms | 102 ms |
-| awake per cycle, cold boot | 5260 ms | 2344 ms |
-| awake per cycle, timer wake | 5260 ms | **1963 ms** |
-| awake per day | ~25 min | **~9 min** |
+| awake per cycle | 5260 ms | **4284 ms** |
+| awake per day | ~25 min | **~20 min** |
+
+(2.0-2.3 s of that before the per-wake panel clear became necessary.)
 | free RAM | ~55 KB largest block | 275 KB |
 | image size | 3.4 MB | 1.16 MB |
 
