@@ -19,8 +19,8 @@ depends on every one of them.
 | 2 | main screen | done |
 | 3 | deep sleep, RTC state, toggle | done |
 | 4 | remaining screens, fault tables, alarms | done |
-| 5 | AP config portal | next |
-| 6 | soak and cutover | |
+| 5 | AP config portal | done |
+| 6 | soak and cutover | next |
 
 ## Build and flash
 
@@ -39,7 +39,17 @@ Requires `esp32:esp32` core 3.3.11 and libraries **M5Unified** and
 
 ## Configuration
 
-Settings live in NVS under the namespace `minimed`, read via `Preferences`.
+Normally you never touch this: an unconfigured device starts an access
+point, `M5INK_MINIMED_MON` (password `123456789`), and serves a setup form at
+`http://192.168.4.1` — the same fields and field names as the MicroPython
+build, so the two are interchangeable to anyone who has set one up before.
+
+One improvement over that build: `WebServer::arg()` URL-decodes, where the
+Python splits the raw query string, so a WiFi password containing `%`, `&` or
+a space works here and silently does not there.
+
+To seed settings over the cable instead, they live in NVS under the namespace
+`minimed`, read via `Preferences`.
 Credentials are deliberately **not** in this repo. Until the AP portal
 arrives in phase 5, seed them by generating an NVS image and flashing it to
 the `nvs` partition at `0x9000` (`0x5000` long in every 4 MB scheme):

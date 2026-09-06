@@ -527,3 +527,21 @@ void draw_current_screen(LovyanGFX &g, int screen, const State &s,
     default:           draw_main_screen(g, s, c);                  break;
   }
 }
+
+void draw_status_screen(LovyanGFX &g, const char *msg) {
+  g.fillScreen(COLOR_WHITE);
+  int y = MARGIN;
+  int lh = font_height(g, FONT_LABEL);
+  String rest(msg);
+  while (rest.length()) {
+    int nl = rest.indexOf('\n');
+    String line = (nl < 0) ? rest : rest.substring(0, nl);
+    rest = (nl < 0) ? String() : rest.substring(nl + 1);
+    String wrapped[6];
+    int n = wrap_text(g, line.c_str(), PANEL_W - 2 * MARGIN, FONT_LABEL, wrapped, 6);
+    for (int i = 0; i < n; i++) {
+      draw_text(g, wrapped[i].c_str(), MARGIN, y, FONT_LABEL, COLOR_BLACK);
+      y += lh + 2;
+    }
+  }
+}

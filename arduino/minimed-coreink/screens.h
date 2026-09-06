@@ -51,6 +51,11 @@ static const int HYPO_THRESHOLD_MGDL  = 70;
 enum { SCREEN_MAIN = 0, SCREEN_STATS = 1, SCREEN_PUMP = 2, SCREEN_INFO = 3,
        SCREEN_COUNT = 4 };
 
+// Multi-line status text, used by the setup portal. Wraps rather than
+// clipping: these strings are longer than this narrow panel fits, and
+// M5GFX clips silently.
+void draw_status_screen(LovyanGFX &g, const char *msg);
+
 void draw_main_screen(LovyanGFX &g, const State &s, const Config &c);
 void draw_current_screen(LovyanGFX &g, int screen, const State &s,
                          const Config &c, time_t session_start);

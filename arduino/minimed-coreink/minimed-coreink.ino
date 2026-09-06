@@ -6,9 +6,10 @@
 // wake behaviour. Nothing here is a guess; every constant with a number in
 // it was measured on this board.
 //
-// PHASES 0-4: power hold, config, WiFi, fetch, clock, parse, all four
-// screens, the toggle, deep-sleep scheduling, fault codes and the buzzer.
-// Still to come: the AP config portal (5), then soak and cutover (6).
+// Feature-complete against main_m5coreink.py: power hold, config, WiFi,
+// fetch, clock, parse, all four screens, the toggle, deep-sleep scheduling,
+// fault codes, the buzzer and the AP setup portal. What remains is phase 6 -
+// an unattended soak against the MicroPython board, then the cutover call.
 //
 // The power-hold gate (see below) is settled: verified on battery that a
 // software reset recovers by itself, so a crash at 3am does not leave a
@@ -25,6 +26,7 @@
 #include "types.h"
 #include "screens.h"
 #include "faults.h"
+#include "portal.h"
 
 // ---------------------------------------------------------------- hardware
 
@@ -372,6 +374,11 @@ static void dump_state(const State &s, const Config &c) {
 // to be doing. Leave at 0 for real use.
 #define LAYOUT_TEST 0
 
+// 1 = after WiFi connects, serve the setup portal over the existing
+// connection so it can be driven from a laptop without wiping a working
+// device's config. Never leave this on.
+#define PORTAL_TEST 0
+
 // 1 = dump the composed canvas to serial as ASCII, 4x4 pixels per character.
 // This board has no REPL and no screenshots, so without it the only way to
 // check a layout is to ask a human to look at the panel. Costs nothing when
@@ -696,8 +703,12 @@ void setup() {
 
   Config cfg;
   if (!config_read(cfg)) {
-    Serial.println("config incomplete - AP setup is phase 5, halting here");
-    sleep_until(0);
+    // Falls through to AP setup rather than sleeping: appropriate here,
+    // because an unconfigured device is one somebody is standing in front
+    // of. A WiFi FAILURE later does NOT come here - that would strand a
+    // working monitor in setup mode over a transient hiccup.
+    Serial.println("config incomplete - starting setup portal");
+    run_config_portal(cfg);   // never returns; reboots when saved
   }
 
   // --- Toggle wake: redraw from the cached snapshot and go back to sleep.
@@ -731,6 +742,10 @@ void setup() {
   }
   Serial.printf("wifi: connected in %lld ms, ip %s\n",
                 wifi_ms, WiFi.localIP().toString().c_str());
+
+#if PORTAL_TEST
+  run_config_portal_sta(cfg);   // blocks; reboots when a config is submitted
+#endif
 
   State s;
   int64_t t_fetch = esp_timer_get_time();
