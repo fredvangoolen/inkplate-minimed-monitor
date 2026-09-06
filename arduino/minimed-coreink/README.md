@@ -20,7 +20,15 @@ depends on every one of them.
 | 3 | deep sleep, RTC state, toggle | done |
 | 4 | remaining screens, fault tables, alarms | done |
 | 5 | AP config portal | done |
-| 6 | soak and cutover | next |
+| 6 | soak and cutover | in progress |
+
+All four screens confirmed against live pump data on the panel. Two bugs
+found that way and only that way, both invisible from the serial console:
+the RTC snapshot was re-initialised on every wake (so every toggle wake drew
+the secondary screens from nothing), and the IP was read after the radio had
+been powered down. See `1429da6` - the lesson is that the scheduled-poll path
+and the toggle path draw from different sources, and testing the first says
+nothing about the second.
 
 ## Build and flash
 
