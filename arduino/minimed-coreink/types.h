@@ -33,6 +33,11 @@ struct State {
   char patient[32] = "";
   time_t lastUpdate = 0;         // epoch UTC of the reading itself
   char banner[64] = "";
+  // Alarm message, and the alarm's OWN occurrence time as LOCAL wall clock
+  // (not "now", and not UTC - see get_alarm_text()). Empty/0 = no alarm.
+  char alarm_text[80] = "";
+  time_t alarm_local = 0;
+  char ip[16] = "";
   int dstDelta = 0;
   // 24h distribution, for the stats screen
   int timeInRange = -1, aboveHyper = -1, belowHypo = -1, averageSG = -1;

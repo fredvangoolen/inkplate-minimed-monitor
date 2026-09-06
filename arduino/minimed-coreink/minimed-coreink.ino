@@ -6,9 +6,9 @@
 // wake behaviour. Nothing here is a guess; every constant with a number in
 // it was measured on this board.
 //
-// PHASES 0-2: power hold, config, WiFi, fetch, clock, parse, and the main
-// screen. Still to come: deep-sleep scheduling and the toggle (3), the other
-// three screens and alarms (4), the AP config portal (5).
+// PHASES 0-4: power hold, config, WiFi, fetch, clock, parse, all four
+// screens, the toggle, deep-sleep scheduling, fault codes and the buzzer.
+// Still to come: the AP config portal (5), then soak and cutover (6).
 //
 // The power-hold gate (see below) is settled: verified on battery that a
 // software reset recovers by itself, so a crash at 3am does not leave a
@@ -24,8 +24,7 @@
 #include "esp_sleep.h"
 #include "types.h"
 #include "screens.h"
-
-#define VERSION "0.1-arduino"
+#include "faults.h"
 
 // ---------------------------------------------------------------- hardware
 
@@ -182,6 +181,83 @@ static bool http_get(const Config &c, const char *path,
   return status == 200;
 }
 
+// ------------------------------------------------------------------ alarms
+//
+// Deliberately no cross-cycle dedup bookkeeping: re-announcing an alarm that
+// is still recent is the CORRECT behaviour for an ambient monitor, not
+// something to suppress. Every wake re-runs this from scratch.
+
+static const uint32_t ALARM_RECENCY_S = 15 * 60;
+
+// "yyyy-mm-ddThh:mm:ss.000-00:00" -> epoch, parsed with no timezone
+// awareness at all. See get_alarm_text() for why that is what we want.
+static time_t parse_alarm_datetime(const char *str) {
+  struct tm t = {};
+  if (!str || sscanf(str, "%d-%d-%dT%d:%d:%d", &t.tm_year, &t.tm_mon,
+                     &t.tm_mday, &t.tm_hour, &t.tm_min, &t.tm_sec) != 6) {
+    return 0;
+  }
+  t.tm_year -= 1900;
+  t.tm_mon  -= 1;
+  return mktime(&t);   // TZ is pinned to UTC, so this is a naive conversion
+}
+
+// Fills s.alarm_text / s.alarm_local for a still-recent AND still-current
+// alarm, else leaves them empty.
+//
+// Unlike lastConduitUpdateServerDateTime (a true UTC epoch in ms),
+// lastAlarm.dateTime's digits are ALREADY local wall-clock time - confirmed
+// on hardware, where displaying them with a further offset added showed a
+// time 2 hours ahead of the real CEST clock. So the parsed value is right
+// for DISPLAY as-is, but comparing it against a true-UTC now() inflates the
+// recency window by the whole offset: a glucose alarm would linger ~2h15m
+// instead of 15 minutes. Shift it back by the offset for the comparison,
+// display the original.
+static void resolve_alarm(JsonVariantConst lastAlarm, const Config &c, State &s) {
+  if (lastAlarm.isNull()) return;
+  const char *dt = lastAlarm["dateTime"] | "";
+  time_t naive_local = parse_alarm_datetime(dt);
+  // A parse failure returns 0 and must never be mistaken for a recent alarm,
+  // which here would also mean a spurious beep.
+  if (!naive_local) return;
+
+  time_t offset = (time_t)(c.timezone + s.dstDelta) * 3600;
+  time_t utc = naive_local - offset;
+  if (utc <= time(nullptr) - (time_t)ALARM_RECENCY_S) return;
+
+  const char *fault_id = lastAlarm["faultId"] | "";
+  if (!fault_id[0]) return;
+  const char *canon = fault_canonical(fault_id);
+
+  // A low/high glucose notification goes stale the moment the reading
+  // recovers - showing it then would be worse than showing nothing.
+  if (s.sg > 0) {
+    if (fault_is_low_glucose(canon)  && s.sg > HYPO_THRESHOLD_MGDL)  return;
+    if (fault_is_high_glucose(canon) && s.sg < HYPER_THRESHOLD_MGDL) return;
+  }
+
+  fault_str(fault_id, s.alarm_text, sizeof(s.alarm_text));
+  s.alarm_local = naive_local;
+}
+
+// ------------------------------------------------------------------ buzzer
+
+static const int BUZZER_FREQ_HZ = 2000;   // near the resonant peak of a piezo this size
+static const int BUZZER_MS      = 400;    // long enough to carry from another room
+
+static void beep() {
+  M5.Speaker.begin();
+  M5.Speaker.setVolume(255);
+  M5.Speaker.tone(BUZZER_FREQ_HZ, BUZZER_MS);
+  // tone() queues the sound and returns immediately, so the beep must be
+  // waited out: without this the deep sleep at the end of the cycle cuts
+  // power to the speaker mid-note and the alarm is inaudible - a silent
+  // failure that looks entirely fine in the logs.
+  uint32_t deadline = millis() + BUZZER_MS + 500;
+  while (M5.Speaker.isPlaying() && (int32_t)(deadline - millis()) > 0) delay(20);
+  delay(50);
+}
+
 // ----------------------------------------------------------------- polling
 
 // Mirrors handle_pumpdataupdate(). Returns false if there is no usable data;
@@ -254,6 +330,9 @@ static bool fetch_pump_data(const Config &c, State &s) {
   }
   for (char *p = s.banner; *p; p++) if (*p == '_') *p = ' ';
 
+  // After sg, because the glucose-recovered checks need it.
+  resolve_alarm(doc["lastAlarm"], c, s);
+
   s.timeInRange = doc["timeInRange"]      | -1;
   s.aboveHyper  = doc["aboveHyperLimit"]  | -1;
   s.belowHypo   = doc["belowHypoLimit"]   | -1;
@@ -279,6 +358,7 @@ static void dump_state(const State &s, const Config &c) {
   Serial.printf("  patient       %s (config: %s)\n", s.patient, c.patient.c_str());
   Serial.printf("  lastUpdate    %s UTC\n", when);
   Serial.printf("  banner        '%s'\n", s.banner);
+  Serial.printf("  alarm         '%s'\n", s.alarm_text);
   Serial.printf("  dstDelta      %d\n", s.dstDelta);
   Serial.printf("  stats         inRange %d  above %d  below %d  avgSG %d\n",
                 s.timeInRange, s.aboveHyper, s.belowHypo, s.averageSG);
@@ -360,13 +440,14 @@ static void dump_canvas_ascii(M5Canvas &canvas) {
 // drawing call, so a screen built from a few dozen primitives triggers a few
 // dozen panel updates. Measured on the MicroPython build, drawing straight
 // to the panel took 7.7s for this screen against ~30ms composed.
-static void compose(int screen, const State &s, const Config &c, bool full_refresh) {
+static void compose(int screen, const State &s, const Config &c,
+                    bool full_refresh, time_t session_start) {
   M5.Display.setEpdMode(full_refresh ? epd_mode_t::epd_quality
                                      : epd_mode_t::epd_fast);
   M5Canvas canvas(&M5.Display);
   canvas.setColorDepth(CANVAS_BPP);
   if (canvas.createSprite(PANEL_W, PANEL_H)) {
-    draw_current_screen(canvas, screen, s, c);
+    draw_current_screen(canvas, screen, s, c, session_start);
 #if DEBUG_ASCII
     dump_font_metrics(canvas);
     dump_canvas_ascii(canvas);
@@ -377,7 +458,7 @@ static void compose(int screen, const State &s, const Config &c, bool full_refre
     // Should not happen here - this build has ~275KB free where MicroPython
     // had a ~55KB largest block - but a slow screen beats a blank one.
     Serial.println("canvas allocation failed, drawing direct");
-    draw_current_screen(M5.Display, screen, s, c);
+    draw_current_screen(M5.Display, screen, s, c, session_start);
   }
 }
 
@@ -521,7 +602,8 @@ static void sleep_until(time_t next_poll) {
 // Returns the screen left on display. Each press advances one screen and
 // restarts the window, so a conversation with the device never drops back to
 // sleep mid-flick.
-static int run_toggle_session(int screen, const State &s, const Config &c) {
+static int run_toggle_session(int screen, const State &s, const Config &c,
+                              time_t session_start) {
   install_toggle_irq();
   toggle_take();   // discard the press that woke us; already accounted for
   uint32_t deadline  = millis() + TOGGLE_AWAKE_MS;
@@ -539,7 +621,7 @@ static int run_toggle_session(int screen, const State &s, const Config &c) {
       while (toggle_pressed() && (int32_t)(release_by - millis()) > 0) delay(10);
       toggle_take();
 
-      compose(screen, s, c, false);
+      compose(screen, s, c, false, session_start);
 
       // Settle time: these contacts bounce, and without it one physical
       // flick can register several times and race through the screens.
@@ -625,8 +707,8 @@ void setup() {
   // what keeps it current.
   if (woke_on_toggle && !cold_boot) {
     rtc.screen = (rtc.screen + 1) % SCREEN_COUNT;
-    compose(rtc.screen, rtc.snap, cfg, false);
-    rtc.screen = run_toggle_session(rtc.screen, rtc.snap, cfg);
+    compose(rtc.screen, rtc.snap, cfg, false, rtc.session_start);
+    rtc.screen = run_toggle_session(rtc.screen, rtc.snap, cfg, rtc.session_start);
     sleep_until(rtc.next_poll);   // does not return
   }
 
@@ -662,7 +744,54 @@ void setup() {
   WiFi.mode(WIFI_OFF);
 
   if (ok) {
+#if LAYOUT_TEST
+    // Fault table spot-check against the Python's answers, and a synthetic
+    // alarm so the banner and the buzzer are exercised without waiting for
+    // the pump to misbehave.
+    for (const char *id : {"002", "816", "802", "011", "999"}) {
+      char fb[80];
+      fault_str(id, fb, sizeof(fb));
+      Serial.printf("fault %-4s canonical=%-4s '%s'\n", id, fault_canonical(id), fb);
+    }
+    Serial.printf("low(802)=%d high(816)=%d low(011)=%d\n",
+                  (int)fault_is_low_glucose("802"),
+                  (int)fault_is_high_glucose("816"),
+                  (int)fault_is_low_glucose("011"));
+    fault_str("802", s.alarm_text, sizeof(s.alarm_text));
+    s.alarm_local = time(nullptr) + (time_t)(cfg.timezone + s.dstDelta) * 3600;
+    s.sg = 55;   // consistent with a low-glucose alarm
+    Serial.println("LAYOUT_TEST: synthetic alarm injected");
+#endif
+#if LAYOUT_TEST
+    // Compose every screen once. A screen that crashes reboots the board; a
+    // screen that renders blank passes a crash test but fails a person, so
+    // count the ink too.
+    snprintf(s.ip, sizeof(s.ip), "192.168.1.13");
+    for (int sc = 0; sc < SCREEN_COUNT; sc++) {
+      M5Canvas probe(&M5.Display);
+      probe.setColorDepth(CANVAS_BPP);
+      probe.createSprite(PANEL_W, PANEL_H);
+      draw_current_screen(probe, sc, s, cfg, time(nullptr) - 3600 * 37);
+      int ink = 0;
+      for (int y = 0; y < PANEL_H; y++)
+        for (int x = 0; x < PANEL_W; x++)
+          if (probe.readPixel(x, y) < 8) ink++;
+      Serial.printf("screen %d composed, ink %d px (%.1f%%)\n",
+                    sc, ink, 100.0 * ink / (PANEL_W * PANEL_H));
+      probe.deleteSprite();
+    }
+#endif
     dump_state(s, cfg);
+    // Beep BEFORE the panel refresh, not after: the point of the sound is to
+    // summon someone who is not looking at the device, so it should not wait
+    // behind a redraw they are not watching anyway. One beep per cycle in
+    // which an alarm is showing - a still-active alarm beeping again next
+    // wake is intended, not a missing dedup.
+    if (s.alarm_text[0]) {
+      Serial.printf("alarm active, sounding buzzer: %s\n", s.alarm_text);
+      beep();
+    }
+    snprintf(s.ip, sizeof(s.ip), "%s", WiFi.localIP().toString().c_str());
     rtc.snap = s;
     // Anchor the cadence on the fetch, not on the wake, so the tail of the
     // cycle never shifts the schedule.
@@ -674,7 +803,8 @@ void setup() {
 
   // Tested before the increment so cycle 0 - the first draw after a cold
   // boot, which has the splash still on the panel to clear - is a full one.
-  compose(SCREEN_MAIN, rtc.snap, cfg, (rtc.cycle % FULL_REFRESH_EVERY) == 0);
+  compose(SCREEN_MAIN, rtc.snap, cfg, (rtc.cycle % FULL_REFRESH_EVERY) == 0,
+          rtc.session_start);
   rtc.cycle++;
 
   sleep_until(rtc.next_poll);

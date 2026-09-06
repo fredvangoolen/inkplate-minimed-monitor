@@ -17,9 +17,9 @@ depends on every one of them.
 | 0 | toolchain, splash, power-hold gate | done |
 | 1 | config, WiFi, fetch, clock, parse | done |
 | 2 | main screen | done |
-| 3 | deep sleep, RTC state, toggle | done (toggle unverified on hardware) |
-| 4 | remaining screens, fault tables, alarms | next |
-| 5 | AP config portal | |
+| 3 | deep sleep, RTC state, toggle | done |
+| 4 | remaining screens, fault tables, alarms | done |
+| 5 | AP config portal | next |
 | 6 | soak and cutover | |
 
 ## Build and flash
@@ -83,6 +83,19 @@ shrink to 10 px against the 17 px DejaVu72 leaves them, and the arrows are
 what turn a number into a direction. Both builds compute their geometry from
 `fontHeight()`/`textWidth()` at runtime, so each is internally consistent -
 they simply do not produce identical panels.
+
+## Fault tables are generated, not transcribed
+
+`faults.cpp` is generated from `main_m5coreink.py`'s `faultIdMapping` (137
+entries) and `faultIdTable` (63), plus the low/high glucose id sets, by a
+script in the phase 4 commit. Hand-transcribing 200 lines of
+reverse-engineered pump data is exactly the kind of job that produces one
+silently wrong entry, and the two builds must not drift. Regenerate rather
+than edit.
+
+Verified on device against the Python's own answers: 002, 816, 802, 011 and
+an unknown 999 all resolve identically, and the glucose-recovered checks
+agree.
 
 ## The panel needs a clear on every wake
 

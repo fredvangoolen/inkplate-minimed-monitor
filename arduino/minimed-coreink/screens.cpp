@@ -1,5 +1,6 @@
 #include "screens.h"
 #include <time.h>
+#include <math.h>
 
 // ------------------------------------------------------------------- fonts
 //
@@ -191,7 +192,25 @@ static void time_delta_txt(const struct tm &upd, const struct tm &now,
 void draw_main_screen(LovyanGFX &g, const State &s, const Config &c) {
   g.fillScreen(COLOR_WHITE);
 
-  const char *banner_src = s.banner[0] ? s.banner : "";
+  // An alarm outranks the generic pump banner.
+  char banner_buf[110];
+  if (s.alarm_text[0]) {
+    if (s.alarm_local) {
+      // For a genuine alarm (not the generic banner, which carries no
+      // comparable timestamp) append when it actually occurred - that is how
+      // a caregiver tells a fresh alarm from one still showing because it is
+      // within its re-announce window, and a repeat beep from a new one.
+      struct tm at;
+      gmtime_r(&s.alarm_local, &at);   // already local wall clock
+      snprintf(banner_buf, sizeof(banner_buf), "%s (%02d:%02d)",
+               s.alarm_text, at.tm_hour, at.tm_min);
+    } else {
+      snprintf(banner_buf, sizeof(banner_buf), "%s", s.alarm_text);
+    }
+  } else {
+    snprintf(banner_buf, sizeof(banner_buf), "%s", s.banner);
+  }
+  const char *banner_src = banner_buf;
   bool has_banner = banner_src[0] != '\0';
 
   // The reading is drawn large whenever the bottom strip is not needed for
@@ -339,21 +358,172 @@ static int draw_screen_header(LovyanGFX &g, const char *title) {
   return y + 7;
 }
 
-// Phase 4 fills these in. They exist now so the toggle can be exercised
-// end-to-end in phase 3 - a screen cycle with only one screen in it proves
-// nothing.
-static void draw_placeholder(LovyanGFX &g, const char *title) {
-  g.fillScreen(COLOR_WHITE);
-  int y = draw_screen_header(g, title);
-  draw_text(g, "not ported yet", MARGIN, y + 10, FONT_LABEL, COLOR_BLACK);
-  draw_text(g, "(phase 4)", MARGIN, y + 30, FONT_LABEL, COLOR_BLACK);
+static String fmt_runtime(time_t start) {
+  // Hours, because the question this answers is "how many hours does a
+  // charge last" - days would round away exactly the resolution wanted.
+  if (!start) return "--";
+  long secs = (long)(time(nullptr) - start);
+  if (secs < 0) return "--";
+  float hours = secs / 3600.0f;
+  char buf[16];
+  if (hours < 100) snprintf(buf, sizeof(buf), "%.1f h", hours);
+  else             snprintf(buf, sizeof(buf), "%d h", (int)hours);
+  return String(buf);
 }
 
-void draw_current_screen(LovyanGFX &g, int screen, const State &s, const Config &c) {
+static void pct_txt(int v, char *buf, size_t n) {
+  if (v < 0) snprintf(buf, n, "--");
+  else       snprintf(buf, n, "%d%%", v);
+}
+
+void draw_stats_screen(LovyanGFX &g, const State &s) {
+  g.fillScreen(COLOR_WHITE);
+  int y = draw_screen_header(g, "GLUCOSE, LAST 24 H");
+
+  // A stacked bar makes the split readable without reading any numbers,
+  // which is the whole point of a summary screen. With no colour to work
+  // with the segments are distinguished by fill: below-target solid black,
+  // in-target hatched, above-target open. That ordering is deliberate - low
+  // glucose is the dangerous end, so it gets the heaviest ink and is
+  // impossible to miss in peripheral vision.
+  int bar_h = 20;
+  int bar_w = PANEL_W - 2 * MARGIN;
+  int below = s.belowHypo, inrange = s.timeInRange, above = s.aboveHyper;
+  if (below >= 0 && inrange >= 0 && above >= 0 && (below + inrange + above) > 0) {
+    int total = below + inrange + above;
+    int x = MARGIN;
+    // The last segment takes the rounding remainder so the three always
+    // exactly fill the bar; computing each independently leaves a 1-2px gap
+    // that reads as a rendering fault.
+    int w_below = bar_w * below / total;
+    int w_in    = bar_w * inrange / total;
+    int w_above = bar_w - w_below - w_in;
+    g.fillRect(x, y, w_below, bar_h, COLOR_BLACK);
+    x += w_below;
+    for (int hx = x; hx < x + w_in; hx += 3) {
+      g.drawLine(hx, y, hx, y + bar_h - 1, COLOR_BLACK);
+    }
+    x += w_in;
+    g.fillRect(x, y, w_above, bar_h, COLOR_WHITE);
+    g.drawRect(MARGIN, y, bar_w, bar_h, COLOR_BLACK);
+  } else {
+    g.drawRect(MARGIN, y, bar_w, bar_h, COLOR_BLACK);
+  }
+  y += bar_h + 8;
+
+  char v[12], label[24];
+  pct_txt(inrange, v, sizeof(v));
+  y += draw_kv_row(g, y, "In target", FONT_LABEL, v, FONT_VALUE, COLOR_BLACK) + 4;
+  pct_txt(above, v, sizeof(v));
+  snprintf(label, sizeof(label), "Above %d", HYPER_THRESHOLD_MGDL);
+  y += draw_kv_row(g, y, label, FONT_LABEL, v, FONT_VALUE, COLOR_BLACK) + 4;
+  pct_txt(below, v, sizeof(v));
+  snprintf(label, sizeof(label), "Below %d", HYPO_THRESHOLD_MGDL);
+  y += draw_kv_row(g, y, label, FONT_LABEL, v, FONT_VALUE, COLOR_BLACK) + 4;
+
+  char avg[16];
+  if (s.averageSG < 0) snprintf(avg, sizeof(avg), "-- mg/dL");
+  else                 snprintf(avg, sizeof(avg), "%d mg/dL", s.averageSG);
+  y += 2;
+  draw_kv_row(g, y, "Average", FONT_LABEL, avg, FONT_UNIT, COLOR_BLACK);
+}
+
+void draw_pump_screen(LovyanGFX &g, const State &s, const Config &c) {
+  // Between glucose and the technical screen: what a caregiver plans around
+  // rather than reacts to. None of it is urgent enough for the main screen,
+  // all of it is what you want to know before leaving the house.
+  g.fillScreen(COLOR_WHITE);
+  int y = draw_screen_header(g, "PUMP & SENSOR");
+
+  const char *patient = c.patient.length() ? c.patient.c_str()
+                      : (s.patient[0] ? s.patient : "--");
+
+  char insulin[24];
+  if (s.reservoirUnits < 0)   snprintf(insulin, sizeof(insulin), "--");
+  else if (s.reservoirPct < 0) snprintf(insulin, sizeof(insulin), "%d U", (int)lroundf(s.reservoirUnits));
+  else snprintf(insulin, sizeof(insulin), "%d U  %d%%",
+                (int)lroundf(s.reservoirUnits), s.reservoirPct);
+
+  // 255 is the pump's "no sensor / not settled yet" sentinel, not a life of
+  // ten and a half days.
+  char sensor[16];
+  if (s.sageHours >= 255 || s.sageHours < 0) snprintf(sensor, sizeof(sensor), "--");
+  else if (s.sageHours >= 48) snprintf(sensor, sizeof(sensor), "%dd %dh",
+                                       s.sageHours / 24, s.sageHours % 24);
+  else snprintf(sensor, sizeof(sensor), "%d h", s.sageHours);
+
+  char batt[8];
+  pct_txt(s.batteryPct, batt, sizeof(batt));
+
+  // Values in the larger font: four rows where the info screen has eight, so
+  // the room is there, and these are numbers read across a room rather than
+  // settings leaned in to check.
+  struct { const char *label; const char *value; } rows[] = {
+    {"Patient",   patient},
+    {"Insulin",   insulin},
+    {"Sensor",    sensor},
+    {"Pump batt", batt},
+  };
+  for (auto &r : rows) {
+    y += draw_kv_row(g, y, r.label, FONT_LABEL, r.value, FONT_VALUE, COLOR_BLACK) + 6;
+  }
+}
+
+void draw_info_screen(LovyanGFX &g, const State &s, const Config &c,
+                      time_t session_start) {
+  g.fillScreen(COLOR_WHITE);
+  int y = draw_screen_header(g, "DEVICE & NETWORK");
+
+  char batt[8];
+  int level = M5.Power.getBatteryLevel();
+  if (level < 0) snprintf(batt, sizeof(batt), "--");
+  else           snprintf(batt, sizeof(batt), "%d%%", level);
+
+  char clock[8];
+  if (time(nullptr) > 1600000000) {
+    struct tm now;
+    local_tm(time(nullptr), c.timezone, s.dstDelta, now);
+    snprintf(clock, sizeof(clock), "%02d:%02d", now.tm_hour, now.tm_min);
+  } else {
+    snprintf(clock, sizeof(clock), "--");
+  }
+
+  char port[8], version[16];
+  snprintf(port, sizeof(port), "%u", c.proxyport);
+  snprintf(version, sizeof(version), "V%s", VERSION_STR);
+  String runtime = fmt_runtime(session_start);
+
+  // Battery first: the only line that changes on its own and the only one
+  // that predicts the device silently dying. NTP server and timezone used to
+  // sit here and were dropped rather than squeezed - both are write-once
+  // settings readable from the config page, where runtime and battery change
+  // by themselves and are what someone comes to this screen to find.
+  struct { const char *label; const char *value; } rows[] = {
+    {"Battery",  batt},
+    {"Runtime",  runtime.c_str()},
+    {"Time",     clock},
+    {"WiFi",     c.wifissid.length() ? c.wifissid.c_str() : "--"},
+    {"IP",       s.ip[0] ? s.ip : "--"},
+    {"Proxy",    c.proxyaddr.length() ? c.proxyaddr.c_str() : "--"},
+    {"Port",     port},
+    {"Version",  version},
+  };
+  int lh = font_height(g, FONT_LABEL);
+  for (auto &r : rows) {
+    // An SSID, an IPv4 address, a hostname: the one place on any screen
+    // where user-supplied text of unbounded length is rendered, so these are
+    // right-aligned and truncated rather than trusted to fit.
+    draw_kv_row(g, y, r.label, FONT_LABEL, r.value, FONT_LABEL, COLOR_BLACK);
+    y += lh + 5;
+  }
+}
+
+void draw_current_screen(LovyanGFX &g, int screen, const State &s,
+                         const Config &c, time_t session_start) {
   switch (screen) {
-    case SCREEN_STATS: draw_placeholder(g, "GLUCOSE, LAST 24 H"); break;
-    case SCREEN_PUMP:  draw_placeholder(g, "PUMP & SENSOR");      break;
-    case SCREEN_INFO:  draw_placeholder(g, "DEVICE & NETWORK");   break;
-    default:           draw_main_screen(g, s, c);                 break;
+    case SCREEN_STATS: draw_stats_screen(g, s);                    break;
+    case SCREEN_PUMP:  draw_pump_screen(g, s, c);                  break;
+    case SCREEN_INFO:  draw_info_screen(g, s, c, session_start);   break;
+    default:           draw_main_screen(g, s, c);                  break;
   }
 }

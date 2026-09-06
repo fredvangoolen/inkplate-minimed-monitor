@@ -10,6 +10,10 @@
 #include <M5Unified.h>
 #include "types.h"
 
+// Shown on the info screen; kept here so both the screen and the sketch
+// agree on one string.
+#define VERSION_STR "0.1-arduino"
+
 static const int PANEL_W = 200;
 static const int PANEL_H = 200;
 static const int MARGIN  = 4;
@@ -48,4 +52,5 @@ enum { SCREEN_MAIN = 0, SCREEN_STATS = 1, SCREEN_PUMP = 2, SCREEN_INFO = 3,
        SCREEN_COUNT = 4 };
 
 void draw_main_screen(LovyanGFX &g, const State &s, const Config &c);
-void draw_current_screen(LovyanGFX &g, int screen, const State &s, const Config &c);
+void draw_current_screen(LovyanGFX &g, int screen, const State &s,
+                         const Config &c, time_t session_start);
