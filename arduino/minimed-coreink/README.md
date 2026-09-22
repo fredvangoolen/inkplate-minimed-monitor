@@ -48,6 +48,33 @@ WiFi + JSON build already fills to 88%.
 Requires `esp32:esp32` core 3.3.11 and libraries **M5Unified** and
 **ArduinoJson**.
 
+## Several WiFi networks
+
+Up to three, tried in a way that costs nothing in the steady state. The slot
+that last worked is remembered in RTC memory and tried first, with its
+channel and BSSID cached so `WiFi.begin()` can skip hunting for the access
+point. Only if that fails is a scan paid — once — after which the new network
+becomes the remembered one.
+
+Measured on this board, moving between home WiFi and a phone hotspot:
+
+| | |
+|---|---|
+| remembered network present | **1176 ms** — same as the single-network build |
+| surroundings changed (8 s timeout + scan + connect) | 15.9 s, once |
+
+Trying networks in turn instead would spend the full attempt timeout on an
+absent network on *every* wake at whichever site is listed second. Scanning
+only attempts networks actually in range.
+
+Slot 0 keeps the original `wifissid`/`wifipass` NVS keys, so a device
+configured before this existed needs no reconfiguration; slots 1 and 2 use
+`ssid1`/`pass1` and `ssid2`/`pass2`. The setup portal offers a second pair.
+
+A total WiFi failure still just skips the cycle and retries on the next wake —
+it must never fall into AP setup mode, which would strand a working monitor
+over a hiccup.
+
 ## Configuration
 
 Normally you never touch this: an unconfigured device starts an access
