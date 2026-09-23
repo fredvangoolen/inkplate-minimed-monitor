@@ -1,9 +1,9 @@
 # Core Ink monitor — Arduino port
 
-A C++ port of `main_m5coreink.py`, in progress. The MicroPython build remains
-the reference implementation and stays deployed on the second Core Ink until
-this reaches parity; board-independent logic is duplicated across the two,
-not shared.
+A C++ port of `main_m5coreink.py`, and what both Core Inks now run.
+`main_m5coreink.py` stays in the repo: it is still the reference for what the
+behaviour should be, and the way back if this build ever misbehaves.
+Board-independent logic is duplicated across the two, not shared.
 
 How the port is put together — the entry point, the files, the cycle — is in
 [architecture.md](architecture.md).
@@ -23,7 +23,7 @@ depends on every one of them.
 | 3 | deep sleep, RTC state, toggle | done |
 | 4 | remaining screens, fault tables, alarms | done |
 | 5 | AP config portal | done |
-| 6 | soak and cutover | in progress |
+| 6 | soak and cutover | done — see below |
 
 All four screens confirmed against live pump data on the panel. Two bugs
 found that way and only that way, both invisible from the serial console:
@@ -32,6 +32,38 @@ the secondary screens from nothing), and the IP was read after the radio had
 been powered down. See `1429da6` - the lesson is that the scheduled-poll path
 and the toggle path draw from different sources, and testing the first says
 nothing about the second.
+
+## Phase 6: the soak said the port was not worth it for power
+
+Run for several days beside the MicroPython board, the two drew **almost
+identical** power. The port is a codebase improvement, not a battery one, and
+the honest reason it was kept is the code rather than the runtime.
+
+Why: the workload was never compute-bound. Of a cycle, the panel takes ~2.3 s
+of e-paper waveform, WiFi association 1.2 s, and the application logic about
+0.1 s — where the C++ build is in fact *slower* than MicroPython (102 ms
+against 79 ms), the round trip dominating either way. Compiling away the
+interpreter optimised the one part that was already small, and most of that
+saving went straight back into the per-wake panel clear this port turned out
+to need.
+
+The rest dilutes it. At a ~1.5 % duty cycle, the two builds differ by 0.3 %
+of `(I_awake - I_sleep)`; if this board's deep-sleep draw is a milliamp or
+more, that difference disappears into the noise over a few days, which is
+what happened.
+
+**Two things were never measured and would settle it**, if anyone cares to:
+
+- current, rather than time — everything here is timing, never milliamps
+- battery life at a 600 s poll instead of 300 s. If it roughly doubles, awake
+  time dominates and is worth attacking; if it barely moves, deep sleep
+  dominates and no amount of awake-time work will help
+
+And if awake time does dominate, the lever is not the language: it is clearing
+the panel every *fourth* wake instead of every wake (~4.28 s → ~2.9 s), a
+bigger win than the whole port delivered. M5's own factory firmware clears
+once per ten updates, so once per wake is likely conservative — though its
+device never sleeps, so its panel controller keeps state ours loses.
 
 ## Build and flash
 
@@ -176,10 +208,11 @@ Against the MicroPython build running the same cycle on the same hardware:
 | fetch + parse | 79 ms | 102 ms |
 | awake per cycle | 5260 ms | **4284 ms** |
 | awake per day | ~25 min | **~20 min** |
-
-(2.0-2.3 s of that before the per-wake panel clear became necessary.)
 | free RAM | ~55 KB largest block | 275 KB |
 | image size | 3.4 MB | 1.16 MB |
+
+The cycle was 2.0–2.3 s before the per-wake panel clear became necessary; see
+below. Measured power over several days: **near-identical** to MicroPython.
 
 ### Power hold, from reset
 
