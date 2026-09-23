@@ -502,7 +502,10 @@ void draw_info_screen(LovyanGFX &g, const State &s, const Config &c,
     {"Battery",  batt},
     {"Runtime",  runtime.c_str()},
     {"Time",     clock},
-    {"WiFi",     c.wifissid.length() ? c.wifissid.c_str() : "--"},
+    // The network actually connected, not merely the one configured - with
+    // several slots, "which am I on?" is the useful answer.
+    {"WiFi",     s.ssid[0] ? s.ssid
+                           : (c.wifi[0].ssid.length() ? c.wifi[0].ssid.c_str() : "--")},
     {"IP",       s.ip[0] ? s.ip : "--"},
     {"Proxy",    c.proxyaddr.length() ? c.proxyaddr.c_str() : "--"},
     {"Port",     port},

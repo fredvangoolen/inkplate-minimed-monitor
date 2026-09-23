@@ -13,8 +13,19 @@
 #include <string.h>
 #include <stdio.h>
 
+// Up to three WiFi networks: home, a phone hotspot for demos on location,
+// and one spare. Slot 0 keeps the original NVS key names (wifissid/wifipass)
+// so a device configured before multi-SSID existed needs no reconfiguration.
+#define WIFI_SLOTS 3
+
+struct WifiNet {
+  String ssid, pass;
+  bool usable() const { return ssid.length() && pass.length(); }
+};
+
 struct Config {
-  String wifissid, wifipass, proxyaddr, ntpserver, patient;
+  WifiNet wifi[WIFI_SLOTS];
+  String proxyaddr, ntpserver, patient;
   uint16_t proxyport = 8081;
   int timezone = 0;
 };
@@ -49,6 +60,7 @@ struct State {
   char alarm_text[80];
   time_t alarm_local;
   char ip[16];
+  char ssid[33];             // the network actually in use, for the info screen
   int dstDelta;
   // 24h distribution, for the stats screen
   int timeInRange, aboveHyper, belowHypo, averageSG;

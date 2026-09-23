@@ -71,7 +71,10 @@ static void release_pad_hold() {
 // ------------------------------------------------------------------ timing
 
 static const uint32_t POLL_PERIOD_S = 300;   // matches the CGM cadence
-static const uint32_t WIFI_TIMEOUT_MS = 25000;
+// Per-attempt, not per-cycle. A successful association measures 1.2-1.6s on
+// this board, so 8s is generous; the old 25s was a single-network budget and
+// would dominate a cycle if spent on a network that simply is not there.
+static const uint32_t WIFI_ATTEMPT_MS = 8000;
 static const uint32_t HTTP_TIMEOUT_MS = 30000;
 
 // Below this, time() has never been set (the clock starts at 1970 on a cold
@@ -87,8 +90,14 @@ static bool config_read(Config &c) {
     Serial.println("config: no NVS namespace");
     return false;
   }
-  c.wifissid  = p.getString("wifissid", "");
-  c.wifipass  = p.getString("wifipass", "");
+  // Slot 0 keeps the pre-multi-SSID key names, so an existing device needs
+  // no reconfiguration; slots 1-2 are optional extras.
+  c.wifi[0].ssid = p.getString("wifissid", "");
+  c.wifi[0].pass = p.getString("wifipass", "");
+  c.wifi[1].ssid = p.getString("ssid1", "");
+  c.wifi[1].pass = p.getString("pass1", "");
+  c.wifi[2].ssid = p.getString("ssid2", "");
+  c.wifi[2].pass = p.getString("pass2", "");
   c.proxyaddr = p.getString("proxyaddr", "");
   c.ntpserver = p.getString("ntpserver", "pool.ntp.org");
   c.patient   = p.getString("patient", "");
@@ -97,7 +106,9 @@ static bool config_read(Config &c) {
   p.end();
   // Patient name is deliberately NOT required: the proxy reports firstName,
   // so a device never told a name still shows the right one.
-  return c.wifissid.length() && c.wifipass.length() && c.proxyaddr.length();
+  bool any_wifi = false;
+  for (int i = 0; i < WIFI_SLOTS; i++) any_wifi |= c.wifi[i].usable();
+  return any_wifi && c.proxyaddr.length();
 }
 
 // ------------------------------------------------------------------- state
@@ -181,6 +192,90 @@ static bool http_get(const Config &c, const char *path,
   while (client.available()) body += (char)client.read();
   client.stop();
   return status == 200;
+}
+
+// -------------------------------------------------------------------- wifi
+//
+// Several networks may be configured - typically home plus a phone hotspot
+// for a demo on location. Trying them in turn would be ruinous: a network
+// that is simply absent costs the whole attempt timeout before the next is
+// tried, on EVERY wake at whichever site is listed second.
+//
+// So the last network that worked is remembered in RTC memory and tried
+// first, with its channel and BSSID as a hint so WiFi.begin() can skip
+// hunting for the access point. In the steady state that is one attempt, no
+// scan, and no more expensive than the single-network build. Only when the
+// surroundings actually change is a scan paid, once, and then the new
+// network becomes the remembered one.
+
+static bool try_connect(const WifiNet &net, int32_t channel, const uint8_t *bssid) {
+  WiFi.disconnect(false, false);   // never erase the stored AP config
+  WiFi.mode(WIFI_STA);
+  if (channel > 0 && bssid) WiFi.begin(net.ssid.c_str(), net.pass.c_str(), channel, bssid);
+  else                      WiFi.begin(net.ssid.c_str(), net.pass.c_str());
+  uint32_t deadline = millis() + WIFI_ATTEMPT_MS;
+  while (WiFi.status() != WL_CONNECTED && millis() < deadline) delay(50);
+  return WiFi.status() == WL_CONNECTED;
+}
+
+// Remembers what worked into the RTC fields. Returns the slot index, or -1.
+static int wifi_connect(const Config &c, int remembered_slot,
+                        int32_t remembered_channel, const uint8_t *remembered_bssid) {
+  // 1. The network that worked last time, with the AP hint.
+  if (remembered_slot >= 0 && remembered_slot < WIFI_SLOTS &&
+      c.wifi[remembered_slot].usable()) {
+    bool hinted = remembered_channel > 0;
+    if (try_connect(c.wifi[remembered_slot], remembered_channel,
+                    hinted ? remembered_bssid : nullptr)) {
+      Serial.printf("wifi: slot %d (%s)%s\n", remembered_slot,
+                    c.wifi[remembered_slot].ssid.c_str(),
+                    hinted ? ", cached AP" : "");
+      return remembered_slot;
+    }
+    Serial.printf("wifi: slot %d (%s) did not answer, scanning\n",
+                  remembered_slot, c.wifi[remembered_slot].ssid.c_str());
+  }
+
+  // 2. Scan, then try only networks actually in range, strongest first.
+  //    Scanning beats trying-in-turn because it never waits out a timeout on
+  //    a network that is not there at all.
+  // The radio must be idle first: after a failed association it is still
+  // trying, and scanNetworks() then returns -2 (SCAN_FAILED) without looking
+  // at anything - which made the whole fallback silently useless.
+  WiFi.disconnect(false, false);
+  delay(100);
+  int found = WiFi.scanNetworks();
+  if (found < 0) {          // -1 running, -2 failed: let it settle, once
+    Serial.printf("wifi: scan returned %d, retrying\n", found);
+    WiFi.scanDelete();
+    delay(500);
+    found = WiFi.scanNetworks();
+  }
+  if (found < 0) found = 0;
+  int best_slot = -1, best_rssi = -1000, best_idx = -1;
+  for (int i = 0; i < found; i++) {
+    for (int sl = 0; sl < WIFI_SLOTS; sl++) {
+      if (!c.wifi[sl].usable() || WiFi.SSID(i) != c.wifi[sl].ssid) continue;
+      if (WiFi.RSSI(i) > best_rssi) {
+        best_rssi = WiFi.RSSI(i); best_slot = sl; best_idx = i;
+      }
+    }
+  }
+  if (best_slot < 0) {
+    Serial.printf("wifi: none of the configured networks in range (%d seen)\n", found);
+    WiFi.scanDelete();
+    return -1;
+  }
+  int32_t ch = WiFi.channel(best_idx);
+  uint8_t bssid[6];
+  memcpy(bssid, WiFi.BSSID(best_idx), 6);
+  Serial.printf("wifi: scan picked slot %d (%s) rssi %d ch %d\n",
+                best_slot, c.wifi[best_slot].ssid.c_str(), best_rssi, (int)ch);
+  WiFi.scanDelete();
+
+  // The caller records the channel and BSSID from the live connection, which
+  // is authoritative; nothing is written back here.
+  return try_connect(c.wifi[best_slot], ch, bssid) ? best_slot : -1;
 }
 
 // ------------------------------------------------------------------ alarms
@@ -557,7 +652,7 @@ static void arm_toggle_wake() {
 //
 // A plain struct, where MicroPython had to serialise JSON in and out of RTC
 // memory and re-hydrate it - about 120 lines that simply do not exist here.
-#define RTC_MAGIC 0x4D4D0301u   // bump when the layout changes
+#define RTC_MAGIC 0x4D4D0302u   // bump when the layout changes
 
 struct RtcState {
   uint32_t magic;
@@ -565,6 +660,12 @@ struct RtcState {
   time_t   next_poll;
   time_t   session_start;   // for the runtime counter on the info screen
   uint32_t cycle;
+  // Which network worked last, and where its access point was. Remembering
+  // the slot is what keeps multi-SSID free in the steady state; remembering
+  // the channel and BSSID lets WiFi.begin() skip scanning for the AP.
+  int      wifi_slot;
+  int32_t  wifi_channel;
+  uint8_t  wifi_bssid[6];
   State    snap;
 };
 
@@ -626,24 +727,35 @@ static int run_toggle_session(int screen, const State &s, const Config &c,
       // device here forever.
       uint32_t release_by = millis() + TOGGLE_RELEASE_MAX_MS;
       while (toggle_pressed() && (int32_t)(release_by - millis()) > 0) delay(10);
-      toggle_take();
+      // Only a release wait that TIMED OUT means the switch is genuinely
+      // stuck. Testing the pin after the redraw instead - as this did - is
+      // wrong: the release above already happened, so a pin that is low
+      // again is somebody's NEXT flick, not this one still held.
+      bool stuck = toggle_pressed();
 
-      compose(screen, s, c, false, session_start);
-
-      // Settle time: these contacts bounce, and without it one physical
-      // flick can register several times and race through the screens.
+      // Settle here, before drawing, and clear the latch on this side of the
+      // redraw. Bounce from the press just handled is discarded now, which
+      // means anything latched DURING compose() below is a genuinely new
+      // flick and must survive to advance the next screen.
       delay(TOGGLE_DEBOUNCE_MS);
       toggle_take();
 
-      if (toggle_pressed()) {
-        // Still down: held, resting off-centre, or a failed contact.
-        // Advancing on a level rather than an edge would spin through the
-        // screens for as long as it stays there, so end the session.
-        // arm_toggle_wake() will also decline to arm this pin.
+      uint32_t t_draw = millis();
+      compose(screen, s, c, false, session_start);
+      uint32_t draw_ms = millis() - t_draw;
+
+      if (stuck) {
+        // Held, resting off-centre, or a failed contact. Advancing on a
+        // level rather than an edge would spin through the screens for as
+        // long as it stays there, so end the session. arm_toggle_wake()
+        // will also decline to arm this pin.
         Serial.printf("toggle still held after %u ms - ending session\n",
                       TOGGLE_RELEASE_MAX_MS);
         break;
       }
+      // The redraw is the window in which a fast flick can land; log it so
+      // the size of that window is never again a matter of guesswork.
+      Serial.printf("toggle: screen %d, redraw %u ms\n", screen, draw_ms);
       deadline = millis() + TOGGLE_AWAKE_MS;
     }
     delay(10);
@@ -735,22 +847,28 @@ void setup() {
   rtc.screen = SCREEN_MAIN;
 
   int64_t t_wifi = esp_timer_get_time();
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(cfg.wifissid.c_str(), cfg.wifipass.c_str());
-  uint32_t deadline = millis() + WIFI_TIMEOUT_MS;
-  while (WiFi.status() != WL_CONNECTED && millis() < deadline) delay(50);
+  int32_t ch = rtc.wifi_channel;
+  uint8_t bssid[6];
+  memcpy(bssid, rtc.wifi_bssid, 6);
+  int slot = wifi_connect(cfg, rtc.wifi_slot, ch, bssid);
   int64_t wifi_ms = (esp_timer_get_time() - t_wifi) / 1000;
 
-  if (WiFi.status() != WL_CONNECTED) {
+  if (slot < 0) {
     // A transient WiFi failure skips this cycle rather than being fatal; the
-    // next wake tries again.
+    // next wake tries again. It must NEVER fall through to AP setup mode -
+    // that would strand a working monitor over a hiccup.
     Serial.printf("wifi: failed after %lld ms, skipping cycle\n", wifi_ms);
     sleep_until(rtc.next_poll);
   }
+  // Remember what worked, so the next wake is one attempt and no scan.
+  rtc.wifi_slot = slot;
+  rtc.wifi_channel = WiFi.channel();
+  if (WiFi.BSSID()) memcpy(rtc.wifi_bssid, WiFi.BSSID(), 6);
   // Captured NOW, while the radio is still up. Read after WiFi.mode(WIFI_OFF)
   // it comes back 0.0.0.0, which is what the info screen was showing.
   String local_ip = WiFi.localIP().toString();
-  Serial.printf("wifi: connected in %lld ms, ip %s\n", wifi_ms, local_ip.c_str());
+  Serial.printf("wifi: connected in %lld ms, ip %s, ssid %s ch %d\n",
+                wifi_ms, local_ip.c_str(), WiFi.SSID().c_str(), (int)WiFi.channel());
 
 #if PORTAL_TEST
   run_config_portal_sta(cfg);   // blocks; reboots when a config is submitted
@@ -817,6 +935,7 @@ void setup() {
       beep();
     }
     snprintf(s.ip, sizeof(s.ip), "%s", local_ip.c_str());
+    snprintf(s.ssid, sizeof(s.ssid), "%s", cfg.wifi[slot].ssid.c_str());
     rtc.snap = s;
     // Anchor the cadence on the fetch, not on the wake, so the tail of the
     // cycle never shifts the schedule.

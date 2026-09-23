@@ -39,6 +39,10 @@ static String config_page(const Config &c) {
     "<input type='text' name='fwifissid'></td>"
     "<tr style=\"background-color:rgb(230,230,255)\"><td>Password<br>"
     "<input type='text' name='fwifipass'></td>"
+    "<tr style=\"background-color:rgb(230,230,255)\"><td>2nd SSID (optional)<br>"
+    "<input type='text' name='fssid1'></td>"
+    "<tr style=\"background-color:rgb(230,230,255)\"><td>2nd password<br>"
+    "<input type='text' name='fpass1'></td>"
     "</tbody></table><br>"
     "<table style=\"text-align:left;width:400px;background-color:white;"
     "font-weight:bold;font-size:14px\" cellpadding=2 cellspacing=3><tbody>"
@@ -131,6 +135,10 @@ static void serve(Config c, bool use_ap) {
     String addr = server.arg("fproxyaddr");
     String port = server.arg("fproxyport");
     String pat  = server.arg("fpatient");
+    // Optional second network - a phone hotspot for demos on location. Not
+    // required, and absent values simply clear the slot.
+    String ssid1 = server.arg("fssid1");
+    String pass1 = server.arg("fpass1");
 
     // Patient name is deliberately NOT required: the proxy reports
     // firstName, so a device never told a name still shows the right one.
@@ -150,6 +158,8 @@ static void serve(Config c, bool use_ap) {
     p.putString("proxyaddr", addr);
     p.putString("ntpserver", ntp);
     p.putString("patient",   pat);
+    p.putString("ssid1",     ssid1);
+    p.putString("pass1",     pass1);
     p.putUShort("proxyport", (uint16_t)port.toInt());
     p.putInt("timezone",     tz.toInt());
     p.end();
