@@ -727,24 +727,35 @@ static int run_toggle_session(int screen, const State &s, const Config &c,
       // device here forever.
       uint32_t release_by = millis() + TOGGLE_RELEASE_MAX_MS;
       while (toggle_pressed() && (int32_t)(release_by - millis()) > 0) delay(10);
-      toggle_take();
+      // Only a release wait that TIMED OUT means the switch is genuinely
+      // stuck. Testing the pin after the redraw instead - as this did - is
+      // wrong: the release above already happened, so a pin that is low
+      // again is somebody's NEXT flick, not this one still held.
+      bool stuck = toggle_pressed();
 
-      compose(screen, s, c, false, session_start);
-
-      // Settle time: these contacts bounce, and without it one physical
-      // flick can register several times and race through the screens.
+      // Settle here, before drawing, and clear the latch on this side of the
+      // redraw. Bounce from the press just handled is discarded now, which
+      // means anything latched DURING compose() below is a genuinely new
+      // flick and must survive to advance the next screen.
       delay(TOGGLE_DEBOUNCE_MS);
       toggle_take();
 
-      if (toggle_pressed()) {
-        // Still down: held, resting off-centre, or a failed contact.
-        // Advancing on a level rather than an edge would spin through the
-        // screens for as long as it stays there, so end the session.
-        // arm_toggle_wake() will also decline to arm this pin.
+      uint32_t t_draw = millis();
+      compose(screen, s, c, false, session_start);
+      uint32_t draw_ms = millis() - t_draw;
+
+      if (stuck) {
+        // Held, resting off-centre, or a failed contact. Advancing on a
+        // level rather than an edge would spin through the screens for as
+        // long as it stays there, so end the session. arm_toggle_wake()
+        // will also decline to arm this pin.
         Serial.printf("toggle still held after %u ms - ending session\n",
                       TOGGLE_RELEASE_MAX_MS);
         break;
       }
+      // The redraw is the window in which a fast flick can land; log it so
+      // the size of that window is never again a matter of guesswork.
+      Serial.printf("toggle: screen %d, redraw %u ms\n", screen, draw_ms);
       deadline = millis() + TOGGLE_AWAKE_MS;
     }
     delay(10);
