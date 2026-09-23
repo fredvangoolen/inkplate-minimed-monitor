@@ -1985,22 +1985,30 @@ def run_toggle_session(screen, state, cfg, ip):
       if toggle_take() or toggle_pressed():
          screen = (screen + 1) % SCREEN_COUNT
          # Wait for release BEFORE drawing, so that holding the switch does
-         # not queue a second advance, and so the latch cleared afterwards
-         # only discards this same press rather than a genuine new one.
+         # not queue a second advance.
          # BOUNDED: a stuck-low pin must not park the device here forever.
          release_by = time.ticks_add(time.ticks_ms(), TOGGLE_RELEASE_MAX_MS)
          while toggle_pressed() and time.ticks_diff(release_by, time.ticks_ms()) > 0:
             time.sleep_ms(10)
-         toggle_take()
-         draw_current_screen(screen, state, cfg, ip, full_refresh=False)
-         # Settle time: these contacts bounce, and without it one physical
-         # flick can register several times and race through the screens.
+         # Whether that wait TIMED OUT is the only honest evidence of a
+         # jammed contact. Sampling the pin after the redraw instead - which
+         # this did - is wrong: the release above has already happened, so a
+         # pin that reads low again is somebody's NEXT flick, not this press
+         # still held.
+         stuck = toggle_pressed()
+
+         # Settle here, before drawing, and clear the latch on this side of
+         # the redraw. Bounce from the press just handled is discarded now,
+         # which means anything latched DURING the redraw below is a
+         # genuinely new flick and must survive to advance the next screen.
          time.sleep_ms(TOGGLE_DEBOUNCE_MS)
          toggle_take()
-         if toggle_pressed():
-            # Still down after the release window: the switch is being held,
-            # is resting off-centre, or the contact has failed. Advancing on
-            # a level rather than an edge would spin through the screens for
+
+         draw_current_screen(screen, state, cfg, ip, full_refresh=False)
+
+         if stuck:
+            # Held, resting off-centre, or a failed contact. Advancing on a
+            # level rather than an edge would spin through the screens for
             # as long as it stays there, so stop here and let the session
             # end. arm_toggle_wake() will also decline to arm this pin, so
             # the device sleeps properly instead of waking on it forever.
