@@ -161,8 +161,15 @@ static bool http_get(const Config &c, const char *path,
   status = 0;
   server_epoch = 0;
   WiFiClient client;
-  client.setTimeout(HTTP_TIMEOUT_MS / 1000);
-  if (!client.connect(c.proxyaddr.c_str(), c.proxyport)) {
+  // MILLISECONDS. NetworkClient does not override setTimeout, so this is
+  // Stream::setTimeout, whose own header says "maximum milliseconds to wait
+  // for stream data". Dividing by 1000 here - as this did - set a 30ms read
+  // timeout, which passed unnoticed for weeks because the proxy answered
+  // inside 30ms over ethernet at close range, and then failed every cycle at
+  // -82dBm: connect succeeds, the status line reads back empty, and the
+  // cycle is lost with only "status 0" to show for it.
+  client.setTimeout(HTTP_TIMEOUT_MS);
+  if (!client.connect(c.proxyaddr.c_str(), c.proxyport, HTTP_TIMEOUT_MS)) {
     Serial.println("fetch: connect failed");
     return false;
   }
