@@ -187,12 +187,30 @@ static void time_delta_txt(const struct tm &upd, const struct tm &now,
   else                              snprintf(out, n, "%d min ago", dmin);
 }
 
+// What to say instead of leaving a bare "---" to mean four different things.
+//
+// Worded for whoever is standing in front of the panel rather than for the
+// person who will fix it: the caregiver needs to know whether this is theirs
+// to worry about. "No sensor data" is routine and clears itself; the other
+// three do not, and someone has to act.
+static const char *link_text(int link) {
+  switch (link) {
+    case LINK_NO_SENSOR:     return "No sensor data";
+    case LINK_PROXY_NO_DATA: return "Proxy has no data";
+    case LINK_PROXY_LOGIN:   return "CareLink login needed";
+    case LINK_NO_PROXY:      return "No link to proxy";
+    default:                 return "";
+  }
+}
+
 // ------------------------------------------------------------- main screen
 
 void draw_main_screen(LovyanGFX &g, const State &s, const Config &c) {
   g.fillScreen(COLOR_WHITE);
 
-  // An alarm outranks the generic pump banner.
+  // An alarm outranks everything; a link fault outranks the generic pump
+  // banner, because when the link is down that banner is as stale as the
+  // reading and saying so is more use than repeating it.
   char banner_buf[110];
   if (s.alarm_text[0]) {
     if (s.alarm_local) {
@@ -207,6 +225,8 @@ void draw_main_screen(LovyanGFX &g, const State &s, const Config &c) {
     } else {
       snprintf(banner_buf, sizeof(banner_buf), "%s", s.alarm_text);
     }
+  } else if (s.link != LINK_OK) {
+    snprintf(banner_buf, sizeof(banner_buf), "%s", link_text(s.link));
   } else {
     snprintf(banner_buf, sizeof(banner_buf), "%s", s.banner);
   }

@@ -364,6 +364,24 @@ static void beep() {
 
 // ----------------------------------------------------------------- polling
 
+// Asks the proxy's own status page why it is empty, and returns true if it
+// says a login is needed.
+//
+// Only ever called when the data response was already empty, so it costs
+// nothing in the normal case. Worth the extra round trip there because the
+// two empty cases call for opposite responses: a proxy still starting up
+// fixes itself within a minute, while an expired token needs a person to go
+// and solve a CAPTCHA, and will otherwise sit dead for days.
+static bool proxy_wants_login(const Config &c) {
+  String page;
+  int status = 0;
+  time_t ignored = 0;
+  if (!http_get(c, "", page, status, ignored)) return false;
+  // The status string the proxy renders into its own page; matching on it is
+  // safe because this is our proxy, not a third party's API.
+  return page.indexOf("Valid token required") >= 0;
+}
+
 // Mirrors handle_pumpdataupdate(). Returns false if there is no usable data;
 // the caller draws "no data" rather than treating it as fatal.
 static bool fetch_pump_data(const Config &c, State &s) {
@@ -372,6 +390,7 @@ static bool fetch_pump_data(const Config &c, State &s) {
   time_t server_epoch = 0;
   if (!http_get(c, "carelink/nohistory", body, status, server_epoch)) {
     Serial.printf("fetch: status %d\n", status);
+    s.link = LINK_NO_PROXY;
     return false;
   }
 
@@ -386,9 +405,25 @@ static bool fetch_pump_data(const Config &c, State &s) {
 
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, body);
-  if (err) {
-    Serial.printf("fetch: bad JSON (%s)\n", err.c_str());
-    return false;
+
+  // Getting here means the proxy ANSWERED, so whatever the body says this is
+  // not a link failure. A proxy holding no data sends the bare JSON string ""
+  // (measured: 200, 2 bytes) - and ArduinoJson rejects that outright as
+  // InvalidInput rather than parsing it as a root-level string, which is not
+  // what the first version of this assumed. So a parse failure and a
+  // non-object body are one condition here, and nothing is made to depend on
+  // which way the parser happens to treat "".
+  //
+  // That empty answer is how an expired token used to reach the panel as a
+  // plain "---", indistinguishable from the pump being out of range.
+  if (err || !doc.is<JsonObject>()) {
+    s.link = proxy_wants_login(c) ? LINK_PROXY_LOGIN : LINK_PROXY_NO_DATA;
+    Serial.printf("fetch: proxy answered with no usable data (%s; %s)\n",
+                  err ? err.c_str() : "not an object",
+                  s.link == LINK_PROXY_LOGIN ? "needs login" : "no reason given");
+    // TRUE on purpose: the empty state must replace the snapshot, so the
+    // panel stops showing a reading the proxy can no longer stand behind.
+    return true;
   }
 
   s.haveData = doc["conduitInRange"] | false;
@@ -442,6 +477,12 @@ static bool fetch_pump_data(const Config &c, State &s) {
   s.belowHypo   = doc["belowHypoLimit"]   | -1;
   s.averageSG   = doc["averageSG"]        | -1;
 
+  // The proxy is healthy and answering with real data; if there is still no
+  // reading, the gap is upstream of it - pump out of range of the phone, or
+  // the phone offline. Routine, self-clearing, and NOT the same problem as
+  // any of the states above.
+  s.link = s.sg > 0 ? LINK_OK : LINK_NO_SENSOR;
+
   return true;
 }
 
@@ -452,7 +493,11 @@ static void dump_state(const State &s, const Config &c) {
     gmtime_r(&s.lastUpdate, &tm);
     strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &tm);
   }
+  static const char *LINK_NAMES[] = {
+    "ok", "no sensor data", "proxy has no data", "proxy needs login", "no proxy"
+  };
   Serial.println("---- state ----");
+  Serial.printf("  link          %s\n", LINK_NAMES[s.link]);
   Serial.printf("  haveData      %d\n", (int)s.haveData);
   Serial.printf("  sg            %d mg/dL   trend %s\n", s.sg, s.trend);
   Serial.printf("  activeInsulin %.1f U\n", s.activeInsulin);
@@ -475,6 +520,12 @@ static void dump_state(const State &s, const Config &c) {
 // layout deterministically instead of waiting on whatever the pump happens
 // to be doing. Leave at 0 for real use.
 #define LAYOUT_TEST 0
+
+// 1 = compose the main screen once per LINK_* state and report where the ink
+// landed. The link states are otherwise unreachable on demand: a dead token
+// cannot be conjured without breaking a live monitor, so without this the
+// banner would first be seen during an actual outage. Leave at 0 for real use.
+#define LINK_TEST 0
 
 // 1 = after WiFi connects, serve the setup portal over the existing
 // connection so it can be driven from a laptop without wiping a working
@@ -659,7 +710,7 @@ static void arm_toggle_wake() {
 //
 // A plain struct, where MicroPython had to serialise JSON in and out of RTC
 // memory and re-hydrate it - about 120 lines that simply do not exist here.
-#define RTC_MAGIC 0x4D4D0302u   // bump when the layout changes
+#define RTC_MAGIC 0x4D4D0303u   // bump when the layout changes (State gained .link)
 
 struct RtcState {
   uint32_t magic;
@@ -931,6 +982,29 @@ void setup() {
       probe.deleteSprite();
     }
 #endif
+#if LINK_TEST
+    // Ink in the bottom band is the signal that matters: a banner is what
+    // pushes the glucose figure into the smaller font and fills the strip
+    // that is otherwise empty. Counting total ink alone would not
+    // distinguish a rendered banner from a silently clipped one.
+    for (int lk = LINK_OK; lk <= LINK_NO_PROXY; lk++) {
+      State t = s;
+      t.link = lk;
+      t.sg = (lk == LINK_OK) ? 132 : 0;
+      t.alarm_text[0] = '\0';
+      t.banner[0] = '\0';
+      M5Canvas probe(&M5.Display);
+      probe.setColorDepth(CANVAS_BPP);
+      probe.createSprite(PANEL_W, PANEL_H);
+      draw_main_screen(probe, t, cfg);
+      int ink = 0, band = 0;
+      for (int y = 0; y < PANEL_H; y++)
+        for (int x = 0; x < PANEL_W; x++)
+          if (probe.readPixel(x, y) < 8) { ink++; if (y >= 150) band++; }
+      Serial.printf("link %d: ink %4d px, bottom band %4d px\n", lk, ink, band);
+      probe.deleteSprite();
+    }
+#endif
     dump_state(s, cfg);
     // Beep BEFORE the panel refresh, not after: the point of the sound is to
     // summon someone who is not looking at the device, so it should not wait
@@ -950,6 +1024,17 @@ void setup() {
     if (!rtc.session_start && time(nullptr) > TIME_VALID_EPOCH) {
       rtc.session_start = time(nullptr);
     }
+  } else {
+    // The snapshot is deliberately kept - the last reading is still the best
+    // information anyone has - but it is stamped with why it stopped
+    // advancing. Without this a proxy that has gone away leaves a stale
+    // number on the panel looking exactly like a current one.
+    rtc.snap.link = s.link;
+    // dump_state() only runs on the success path, so say it here too:
+    // otherwise the one cycle where something is actually wrong is the one
+    // cycle that reports nothing.
+    Serial.printf("no data this cycle, panel will show: %s\n",
+                  s.link == LINK_NO_PROXY ? "No link to proxy" : "a link fault");
   }
 
   // Tested before the increment so cycle 0 - the first draw after a cold
