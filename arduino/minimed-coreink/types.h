@@ -30,6 +30,20 @@ struct Config {
   int timezone = 0;
 };
 
+// Why there is no current reading.
+//
+// The panel must not say the same thing for a dead proxy and a pump that is
+// simply out of range: the first needs somebody to act and will not clear on
+// its own, the second is routine and clears itself. Before this they were
+// both a bare "---".
+enum {
+  LINK_OK = 0,          // a current reading was fetched
+  LINK_NO_SENSOR,       // proxy has data, but no current glucose value
+  LINK_PROXY_NO_DATA,   // proxy answered and is holding nothing at all
+  LINK_PROXY_LOGIN,     // proxy says outright that it needs a CareLink login
+  LINK_NO_PROXY,        // could not reach the proxy
+};
+
 // Mirrors new_state() in main_m5coreink.py. Plain values only, so the whole
 // struct can later sit in RTC memory across a deep sleep without the JSON
 // round-trip the MicroPython build needs.
@@ -62,6 +76,7 @@ struct State {
   char ip[16];
   char ssid[33];             // the network actually in use, for the info screen
   int dstDelta;
+  int link;                  // one of LINK_*, why there is no reading
   // 24h distribution, for the stats screen
   int timeInRange, aboveHyper, belowHypo, averageSG;
 };
@@ -75,4 +90,5 @@ inline void state_init(State &s) {
   s.reservoirPct = -1;
   s.sageHours = 255;
   s.timeInRange = s.aboveHyper = s.belowHypo = s.averageSG = -1;
+  s.link = LINK_OK;
 }
