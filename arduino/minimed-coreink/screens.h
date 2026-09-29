@@ -51,6 +51,12 @@ static const int HYPO_THRESHOLD_MGDL  = 70;
 enum { SCREEN_MAIN = 0, SCREEN_STATS = 1, SCREEN_PUMP = 2, SCREEN_INFO = 3,
        SCREEN_COUNT = 4 };
 
+// Which way a flick moves through that list. Down walks forward in the order
+// above; up walks back the way you came, which is the only reason the second
+// direction exists.
+static const int SCREEN_FORWARD = +1;
+static const int SCREEN_BACK    = -1;
+
 // Multi-line status text, used by the setup portal. Wraps rather than
 // clipping: these strings are longer than this narrow panel fits, and
 // M5GFX clips silently.

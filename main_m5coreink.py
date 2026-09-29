@@ -610,6 +610,12 @@ SCREEN_PUMP  = 2
 SCREEN_INFO  = 3
 SCREEN_COUNT = 4
 
+# Which way a flick moves through that list. Down walks forward through the
+# screens; up walks back the way you came, which is the only reason the
+# second direction exists.
+SCREEN_FORWARD = 1
+SCREEN_BACK    = -1
+
 # The three-position switch, labelled G37/G39/G38 on the case: up is
 # GPIO37, down is GPIO39, press is GPIO38. Confirmed by watching every
 # candidate GPIO while the control was operated - all three are momentary
@@ -1998,21 +2004,54 @@ def toggle_pressed():
 # thread is doing, so the press survives the draw and is acted on the moment
 # it finishes.
 _toggle_latch = [False]
+# Which way the last press asked to go. Both pins used to share one handler
+# and every press advanced +1, so flicking up walked FORWARD through the
+# screens exactly like flicking down - there was no way back, only the long
+# way round.
+_toggle_dir = [SCREEN_FORWARD]
 
 
-def _toggle_isr(pin):
-   # Keep this trivial - it runs in interrupt context.
+# Two handlers rather than one that inspects its argument: both stay trivial,
+# which is what an interrupt context wants, and neither depends on how
+# MicroPython identifies the Pin object it hands over.
+def _toggle_isr_up(pin):
    _toggle_latch[0] = True
+   _toggle_dir[0] = SCREEN_BACK
+
+
+def _toggle_isr_down(pin):
+   _toggle_latch[0] = True
+   _toggle_dir[0] = SCREEN_FORWARD
 
 
 def install_toggle_irq():
    try:
-      for gp in (BTN_UP_PIN, BTN_DOWN_PIN):
-         machine.Pin(gp, machine.Pin.IN).irq(
-            trigger=machine.Pin.IRQ_FALLING, handler=_toggle_isr)
+      machine.Pin(BTN_UP_PIN, machine.Pin.IN).irq(
+         trigger=machine.Pin.IRQ_FALLING, handler=_toggle_isr_up)
+      machine.Pin(BTN_DOWN_PIN, machine.Pin.IN).irq(
+         trigger=machine.Pin.IRQ_FALLING, handler=_toggle_isr_down)
    except Exception as e:
       # Falls back to plain polling, which still works between draws.
       print("Toggle IRQ install failed: %s" % e)
+
+
+def toggle_dir_now():
+   # Direction of whichever pin is down right now, for the fallback path that
+   # works off the level rather than the latch. 0 = nothing held.
+   try:
+      if machine.Pin(BTN_UP_PIN, machine.Pin.IN).value() == 0:
+         return SCREEN_BACK
+      if machine.Pin(BTN_DOWN_PIN, machine.Pin.IN).value() == 0:
+         return SCREEN_FORWARD
+   except Exception:
+      pass
+   return 0
+
+
+def screen_step(screen, direction):
+   # Wraps in both directions: Python's % would already handle -1, but going
+   # through one helper keeps the two call sites honest about each other.
+   return (screen + direction + SCREEN_COUNT) % SCREEN_COUNT
 
 
 def toggle_take():
@@ -2076,8 +2115,15 @@ def run_toggle_session(screen, state, cfg, ip):
    hard_stop = time.ticks_add(time.ticks_ms(), TOGGLE_SESSION_MAX_MS)
    while (time.ticks_diff(deadline, time.ticks_ms()) > 0 and
           time.ticks_diff(hard_stop, time.ticks_ms()) > 0):
-      if toggle_take() or toggle_pressed():
-         screen = (screen + 1) % SCREEN_COUNT
+      latched = toggle_take()
+      # Read the level FIRST when there is no latch: by the time the pin is
+      # sampled after a redraw the switch may already be back at rest, and the
+      # latched direction is then the only record of which way it went.
+      direction = _toggle_dir[0] if latched else toggle_dir_now()
+      if latched or direction != 0:
+         if direction == 0:
+            direction = SCREEN_FORWARD
+         screen = screen_step(screen, direction)
          # Wait for release BEFORE drawing, so that holding the switch does
          # not queue a second advance.
          # BOUNDED: a stuck-low pin must not park the device here forever.
@@ -2354,7 +2400,16 @@ def main():
       # scheduled poll below is what keeps the data current; this path only
       # changes which view of it is showing.
       if woke_on_toggle and not cold_boot:
-         screen = (screen + 1) % SCREEN_COUNT
+         # The first step of a session comes from the WAKE REASON, not from
+         # the pins: the interrupt handler is not installed yet, and by the
+         # time the levels are sampled the switch has usually sprung back.
+         # ext0 is armed on the up pin and ext1 on the down pin, so the reason
+         # alone says which way the flick went - which is the whole reason
+         # they were armed separately.
+         direction = SCREEN_BACK if machine.wake_reason() == WAKE_EXT0 else SCREEN_FORWARD
+         screen = screen_step(screen, direction)
+         print("Toggle wake: %s -> screen %d" %
+               ("back" if direction == SCREEN_BACK else "fwd", screen))
          state = state_from_snapshot(snap)
          draw_current_screen(screen, state, cfg, snap.get("ip") if snap else None,
                              full_refresh=False)
