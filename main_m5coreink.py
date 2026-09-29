@@ -826,12 +826,22 @@ def set_clock(epoch):
       return False
 
 
-def http_get(host, port, path, timeout_s=30):
+def http_get(host, port, path, timeout_s=30, connect_timeout_s=8):
+   # Two budgets, not one. The read stays generous - a weak signal can
+   # stretch it, and cutting a reply short costs a whole cycle - but the
+   # handshake is local and takes milliseconds when the proxy is there at
+   # all. Sharing the 30s meant that a proxy which was simply absent blocked
+   # for the full 30s on every wake, turning an outage into a flat battery.
+   #
+   # Note getaddrinfo() runs BEFORE the socket exists and so is covered by
+   # neither: name resolution has its own internal timeout here, unlike the
+   # Arduino build where connect() resolves inside its budget.
    addr = socket.getaddrinfo(host, port)[0][-1]
    s = socket.socket()
-   s.settimeout(timeout_s)
+   s.settimeout(connect_timeout_s)
    try:
       s.connect(addr)
+      s.settimeout(timeout_s)
       req = "GET /%s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n" % (path, host)
       s.send(req.encode())
       chunks = []

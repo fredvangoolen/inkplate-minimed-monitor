@@ -75,7 +75,24 @@ static const uint32_t POLL_PERIOD_S = 300;   // matches the CGM cadence
 // this board, so 8s is generous; the old 25s was a single-network budget and
 // would dominate a cycle if spent on a network that simply is not there.
 static const uint32_t WIFI_ATTEMPT_MS = 8000;
+// Read timeout, once a connection exists. Stays generous: the proxy is
+// answering from its own cached copy and is never the slow part, but a weak
+// signal can stretch the read, and cutting a reply short costs a whole cycle.
 static const uint32_t HTTP_TIMEOUT_MS = 30000;
+// Connect timeout, kept SEPARATE and much shorter - it covers name
+// resolution plus the TCP handshake, both of which are local and fast.
+//
+// Measured on this board: a whole healthy fetch, resolution included, is
+// about 100ms. When the proxy is simply absent, though, connect() blocks for
+// this whole budget on every wake; at the old shared 30s that is ~35s awake
+// per cycle, near 3 hours a day, which turns a proxy outage into a flat
+// battery. 8s is 80x the normal case and caps the damage at about a third.
+//
+// Not lower: one cold boot was seen to take 16s before its first answer,
+// apparently a slow first mDNS resolution. That cycle would now be cut
+// short - a single missed reading after a power-on, which the next wake
+// retries 300s later, and a trade worth making against the outage cost.
+static const uint32_t HTTP_CONNECT_MS = 8000;
 
 // Below this, time() has never been set (the clock starts at 1970 on a cold
 // boot). 2020-09-13.
@@ -169,8 +186,10 @@ static bool http_get(const Config &c, const char *path,
   // -82dBm: connect succeeds, the status line reads back empty, and the
   // cycle is lost with only "status 0" to show for it.
   client.setTimeout(HTTP_TIMEOUT_MS);
-  if (!client.connect(c.proxyaddr.c_str(), c.proxyport, HTTP_TIMEOUT_MS)) {
-    Serial.println("fetch: connect failed");
+  uint32_t t_connect = millis();
+  if (!client.connect(c.proxyaddr.c_str(), c.proxyport, HTTP_CONNECT_MS)) {
+    Serial.printf("fetch: connect failed after %u ms\n",
+                  (unsigned)(millis() - t_connect));
     return false;
   }
   client.printf("GET /%s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n",
