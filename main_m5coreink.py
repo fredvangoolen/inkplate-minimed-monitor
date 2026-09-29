@@ -675,6 +675,7 @@ def make_snapshot(state, ip):
       "alarm": state["alarm_text"],
       "alarm_at": epoch_of(state["alarm_tm"]),
       "banner": state["banner"],
+      "link": state["link"],
       "dst": dstDelta,
       "stats": state["stats"],
       "ip": ip,
@@ -700,6 +701,7 @@ def state_from_snapshot(snap):
    st["active_insulin"] = snap.get("insulin")
    st["alarm_text"] = snap.get("alarm")
    st["banner"] = snap.get("banner")
+   st["link"] = snap.get("link", LINK_OK)
    st["stats"] = snap.get("stats") or {}
    st["battery_pct"] = snap.get("batt")
    st["reservoir_units"] = snap.get("resu")
@@ -1289,6 +1291,46 @@ def beep():
 #
 #################################################
 
+# Why there is no current reading.
+#
+# The panel must not say the same thing for a dead proxy and a pump that is
+# simply out of range: the first needs somebody to act and will not clear on
+# its own, the second is routine and clears itself. Before this they were
+# both a bare "---".
+LINK_OK = 0             # a current reading was fetched
+LINK_NO_SENSOR = 1      # proxy has data, but no current glucose value
+LINK_PROXY_NO_DATA = 2  # proxy answered and is holding nothing at all
+LINK_PROXY_LOGIN = 3    # proxy says outright that it needs a Carelink login
+LINK_NO_PROXY = 4       # could not reach the proxy
+
+# Worded for whoever is standing in front of the panel rather than for the
+# person who will fix it: the caregiver needs to know whether this is theirs
+# to worry about.
+LINK_TEXT = {
+   LINK_NO_SENSOR:     "No sensor data",
+   LINK_PROXY_NO_DATA: "Proxy has no data",
+   LINK_PROXY_LOGIN:   "Carelink login needed",
+   LINK_NO_PROXY:      "No link to proxy",
+}
+
+
+def proxy_wants_login(proxyaddr, proxyport):
+   # Asks the proxy's own status page why it is empty.
+   #
+   # Only ever called when the data response was already empty, so it costs
+   # nothing in the normal case. Worth the extra round trip there because the
+   # two empty cases call for opposite responses: a proxy still starting up
+   # fixes itself within a minute, while an expired token needs a person to
+   # go and solve a CAPTCHA, and will otherwise sit dead for days.
+   try:
+      status_code, body, _ = http_get(proxyaddr, int(proxyport), "")
+   except Exception:
+      return False
+   # The status string the proxy renders into its own page; matching on it is
+   # safe because this is our proxy, not a third party's API.
+   return status_code == 200 and body.find("Valid token required") > -1
+
+
 def new_state():
    # battery_pct/reservoir_units/reservoir_pct/sage_hours are not on the
    # main screen - a caregiver glancing at it wants glucose, not supplies -
@@ -1309,6 +1351,7 @@ def new_state():
       "active_insulin": None,
       "last_update_tm": None,
       "banner": None,
+      "link": LINK_OK,   # one of LINK_*, why there is no reading
       "alarm_text": None,
       "alarm_tm": None,  # local time the alarm itself occurred, not "now"
       # 24h glucose distribution, shown on the stats screen. Same four
@@ -1325,6 +1368,7 @@ def handle_pumpdataupdate(proxyaddr, proxyport, timezone):
       status_code, body, server_epoch = http_get(proxyaddr, int(proxyport), API_URL)
    except (OSError, Exception) as e:
       print("Pump data fetch failed: %s" % e)
+      state["link"] = LINK_NO_PROXY
       return state
 
    # Set the clock BEFORE parsing: the alarm logic below compares alarm
@@ -1337,12 +1381,31 @@ def handle_pumpdataupdate(proxyaddr, proxyport, timezone):
 
    if status_code != 200:
       print("Pump data fetch returned status %s" % status_code)
+      state["link"] = LINK_NO_PROXY
       return state
 
+   # Getting past here means the proxy ANSWERED, so whatever the body says
+   # this is not a link failure.
    try:
       data = json.loads(body)
    except ValueError:
       print("Pump data fetch returned invalid JSON")
+      data = None
+
+   # A proxy holding no data answers 200 with the bare JSON string "".
+   #
+   # NOTE this is where the two builds must NOT share reasoning. Here
+   # json.loads('""') SUCCEEDS and hands back a str, so the parse is not the
+   # thing that catches it and every lookup below would raise TypeError into
+   # one of the swallow-everything handlers - which is exactly how an expired
+   # token used to reach the panel as a plain "---". The Arduino build gets
+   # an outright InvalidInput from the same two bytes. Test the TYPE, not the
+   # parse, and the difference stops mattering.
+   if not isinstance(data, dict):
+      state["link"] = (LINK_PROXY_LOGIN if proxy_wants_login(proxyaddr, proxyport)
+                       else LINK_PROXY_NO_DATA)
+      print("Proxy answered with no usable data (%s)" %
+            ("needs login" if state["link"] == LINK_PROXY_LOGIN else "no reason given"))
       return state
 
    # Timestamp/DST bookkeeping and alarm handling run unconditionally - the
@@ -1434,6 +1497,12 @@ def handle_pumpdataupdate(proxyaddr, proxyport, timezone):
    except (KeyError, IndexError, TypeError):
       pass
 
+   # The proxy is healthy and answering with real data; if there is still no
+   # reading, the gap is upstream of it - pump out of range of the phone, or
+   # the phone offline. Routine, self-clearing, and NOT the same problem as
+   # any of the states above.
+   state["link"] = LINK_OK if state["sg"] else LINK_NO_SENSOR
+
    return state
 
 
@@ -1513,7 +1582,12 @@ def draw_screen(state):
    # one or somebody flicking the switch. This function just composes.
    gfx().fillScreen(WHITE)
 
-   banner_text = state["alarm_text"] or state["banner"]
+   # An alarm outranks everything; a link fault outranks the generic pump
+   # banner, because when the link is down that banner is as stale as the
+   # reading and saying so is more use than repeating it.
+   banner_text = (state["alarm_text"]
+                  or LINK_TEXT.get(state.get("link", LINK_OK))
+                  or state["banner"])
    has_banner = bool(banner_text)
 
    # --- Glucose number, with the trend arrows to its right ---------------
