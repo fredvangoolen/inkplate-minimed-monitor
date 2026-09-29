@@ -710,7 +710,7 @@ static void arm_toggle_wake() {
 //
 // A plain struct, where MicroPython had to serialise JSON in and out of RTC
 // memory and re-hydrate it - about 120 lines that simply do not exist here.
-#define RTC_MAGIC 0x4D4D0303u   // bump when the layout changes (State gained .link)
+#define RTC_MAGIC 0x4D4D0304u   // bump when the layout changes (RtcState gained .fail_streak)
 
 struct RtcState {
   uint32_t magic;
@@ -724,10 +724,28 @@ struct RtcState {
   int      wifi_slot;
   int32_t  wifi_channel;
   uint8_t  wifi_bssid[6];
+  uint8_t  fail_streak;     // consecutive cycles that produced no reading
   State    snap;
 };
 
 RTC_DATA_ATTR RtcState rtc;
+
+// How many consecutive bad cycles before the panel says anything about it.
+//
+// This device is slow background information - a glimpse when following up on
+// someone - and the pump and the patient's own phone are what anyone acts on.
+// So a single missed cycle is not news, and announcing one is worse than
+// useless: it raises an alarming banner for something that fixes itself
+// before anybody walks past the screen. Three cycles is about 15 minutes,
+// which is under the "No data" threshold the Updated row already uses.
+static const uint8_t LINK_FAULT_STREAK = 3;
+
+static void note_link(int link) {
+  if (link == LINK_OK) rtc.fail_streak = 0;
+  else if (rtc.fail_streak < 255) rtc.fail_streak++;
+}
+
+static bool link_fault_confirmed() { return rtc.fail_streak >= LINK_FAULT_STREAK; }
 
 // How often a scheduled refresh uses the slow full-clear waveform. The flash
 // is not required on every wake - the fast waveform writes the same image -
@@ -916,6 +934,24 @@ void setup() {
     // next wake tries again. It must NEVER fall through to AP setup mode -
     // that would strand a working monitor over a hiccup.
     Serial.printf("wifi: failed after %lld ms, skipping cycle\n", wifi_ms);
+    note_link(LINK_NO_PROXY);
+    if (link_fault_confirmed()) rtc.snap.link = LINK_NO_PROXY;
+    // BOTH of these lines are load-bearing, and their absence is what turned
+    // one flaky cycle into a blank panel that "recovered by itself".
+    //
+    // next_poll: it was never advanced here, so it stayed in the past and
+    // sleep_until() clamped to its 5s floor - the board then woke every few
+    // seconds to fail again, at ~4s awake a time, which is a battery fire
+    // rather than a skipped cycle.
+    //
+    // compose(): M5.begin() has ALREADY cleared the panel to white by this
+    // point, so returning to sleep without drawing leaves the screen blank
+    // until some later cycle succeeds. The snapshot is still there and is
+    // still the best information anyone has - draw it.
+    rtc.next_poll = time(nullptr) + POLL_PERIOD_S;
+    compose(SCREEN_MAIN, rtc.snap, cfg, (rtc.cycle % FULL_REFRESH_EVERY) == 0,
+            rtc.session_start);
+    rtc.cycle++;
     sleep_until(rtc.next_poll);
   }
   // Remember what worked, so the next wake is one attempt and no scan.
@@ -944,7 +980,27 @@ void setup() {
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
 
-  if (ok) {
+  note_link(s.link);
+  const bool confirmed = link_fault_confirmed();
+  // An empty answer carries nothing worth adopting - no reading, no alarm,
+  // not even a patient name - so replacing the snapshot with it would throw
+  // away the last good reading over one blip. A fetch that DID return an
+  // object is adopted whatever its link state, because it may carry a fresh
+  // alarm, and an alarm must never wait three cycles.
+  const bool proxy_empty = (s.link == LINK_PROXY_NO_DATA || s.link == LINK_PROXY_LOGIN);
+  const bool adopt = ok && !proxy_empty;
+
+  // Say it before the field is cleared, or a building streak on an adopted
+  // cycle leaves no trace at all: dump_state() below would print "link ok"
+  // and the streak line further down only runs on the other branch.
+  if (s.link != LINK_OK) {
+    Serial.printf("link fault: %d (streak %u/%u)%s\n", s.link,
+                  (unsigned)rtc.fail_streak, (unsigned)LINK_FAULT_STREAK,
+                  confirmed ? "" : " - not announced yet");
+  }
+  if (adopt && !confirmed) s.link = LINK_OK;   // not announced until it repeats
+
+  if (adopt) {
 #if LAYOUT_TEST
     // Fault table spot-check against the Python's answers, and a synthetic
     // alarm so the banner and the buzzer are exercised without waiting for
@@ -1026,15 +1082,21 @@ void setup() {
     }
   } else {
     // The snapshot is deliberately kept - the last reading is still the best
-    // information anyone has - but it is stamped with why it stopped
-    // advancing. Without this a proxy that has gone away leaves a stale
-    // number on the panel looking exactly like a current one.
-    rtc.snap.link = s.link;
-    // dump_state() only runs on the success path, so say it here too:
-    // otherwise the one cycle where something is actually wrong is the one
-    // cycle that reports nothing.
-    Serial.printf("no data this cycle, panel will show: %s\n",
-                  s.link == LINK_NO_PROXY ? "No link to proxy" : "a link fault");
+    // information anyone has - and it is stamped with why it stopped
+    // advancing ONLY once the fault has repeated. Without the stamp a proxy
+    // that has gone away leaves a stale number looking exactly like a current
+    // one; without the streak, one flaky cycle raises a banner that is gone
+    // again before anyone reads it.
+    if (confirmed) rtc.snap.link = s.link;
+    // The schedule has to advance on this path too, or sleep_until() falls to
+    // its 5s floor and the board spins.
+    rtc.next_poll = time(nullptr) + POLL_PERIOD_S;
+    // dump_state() only runs on the adopt path, so say it here too: otherwise
+    // the one cycle where something is actually wrong is the one cycle that
+    // reports nothing.
+    Serial.printf("no data this cycle (streak %u/%u), panel %s\n",
+                  (unsigned)rtc.fail_streak, (unsigned)LINK_FAULT_STREAK,
+                  confirmed ? "will name the fault" : "keeps the last reading, silently");
   }
 
   // Tested before the increment so cycle 0 - the first draw after a cold
