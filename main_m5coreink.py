@@ -826,12 +826,22 @@ def set_clock(epoch):
       return False
 
 
-def http_get(host, port, path, timeout_s=30):
+def http_get(host, port, path, timeout_s=30, connect_timeout_s=8):
+   # Two budgets, not one. The read stays generous - a weak signal can
+   # stretch it, and cutting a reply short costs a whole cycle - but the
+   # handshake is local and takes milliseconds when the proxy is there at
+   # all. Sharing the 30s meant that a proxy which was simply absent blocked
+   # for the full 30s on every wake, turning an outage into a flat battery.
+   #
+   # Note getaddrinfo() runs BEFORE the socket exists and so is covered by
+   # neither: name resolution has its own internal timeout here, unlike the
+   # Arduino build where connect() resolves inside its budget.
    addr = socket.getaddrinfo(host, port)[0][-1]
    s = socket.socket()
-   s.settimeout(timeout_s)
+   s.settimeout(connect_timeout_s)
    try:
       s.connect(addr)
+      s.settimeout(timeout_s)
       req = "GET /%s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n" % (path, host)
       s.send(req.encode())
       chunks = []
@@ -1297,6 +1307,16 @@ def beep():
 # simply out of range: the first needs somebody to act and will not clear on
 # its own, the second is routine and clears itself. Before this they were
 # both a bare "---".
+# How many consecutive bad cycles before the panel says anything about it.
+#
+# This device is slow background information - a glimpse when following up on
+# someone - and the pump and the patient's own phone are what anyone acts on.
+# So a single missed cycle is not news, and announcing one is worse than
+# useless: it raises an alarming banner for something that fixes itself before
+# anybody walks past the screen. Three cycles is about 15 minutes, still under
+# the "No data" threshold the Updated row already uses.
+LINK_FAULT_STREAK = 3
+
 LINK_OK = 0             # a current reading was fetched
 LINK_NO_SENSOR = 1      # proxy has data, but no current glucose value
 LINK_PROXY_NO_DATA = 2  # proxy answered and is holding nothing at all
@@ -2362,7 +2382,24 @@ def main():
 
          wlan = wlan_connect(wifissid, wifipass)
          if not wlan.isconnected():
-            print("WiFi unavailable this cycle, skipping fetch/draw, retrying next wake")
+            # Skipping the FETCH is right; skipping the DRAW is not. The
+            # firmware clears the panel on every boot, so returning to sleep
+            # without composing leaves the screen blank until some later cycle
+            # succeeds - which reads as the device having died, when in fact
+            # the last reading is still perfectly good information.
+            fails = (snap.get("fail", 0) if snap else 0) + 1
+            if snap is not None:
+               snap["fail"] = fails
+               if fails >= LINK_FAULT_STREAK:
+                  snap["link"] = LINK_NO_PROXY
+            print("WiFi unavailable this cycle (streak %d/%d), panel %s" %
+                  (fails, LINK_FAULT_STREAK,
+                   "will name the fault" if fails >= LINK_FAULT_STREAK
+                   else "keeps the last reading, silently"))
+            draw_current_screen(screen, state_from_snapshot(snap), cfg,
+                                snap.get("ip") if snap else None,
+                                full_refresh=(cycle % FULL_REFRESH_EVERY == 0))
+            cycle += 1
          else:
             # NTP is a fallback now, not part of every cycle. The proxy's
             # own Date header sets the clock on every fetch (see
@@ -2411,7 +2448,34 @@ def main():
                print("Could not power down WiFi: %s" % e)
             gc.collect()
 
-            snap = make_snapshot(state, ip)
+            # A fault is not announced until it has repeated: one flaky cycle
+            # should leave the panel exactly as it was. An empty answer
+            # carries nothing worth adopting - no reading, no alarm, not even
+            # a patient name - so it must not replace a good snapshot before
+            # then. A fetch that DID return an object is adopted whatever its
+            # link state, because it may carry a fresh alarm, and an alarm
+            # must never wait three cycles.
+            faulted = state["link"] != LINK_OK
+            fails = ((snap.get("fail", 0) if snap else 0) + 1) if faulted else 0
+            confirmed = faulted and fails >= LINK_FAULT_STREAK
+            proxy_empty = state["link"] in (LINK_PROXY_NO_DATA, LINK_PROXY_LOGIN)
+
+            if proxy_empty:
+               if snap is not None:
+                  snap["fail"] = fails
+                  if confirmed:
+                     snap["link"] = state["link"]
+               state = state_from_snapshot(snap)
+               print("Proxy gave no data (streak %d/%d), panel %s" %
+                     (fails, LINK_FAULT_STREAK,
+                      "will name the fault" if confirmed
+                      else "keeps the last reading, silently"))
+            else:
+               if not confirmed:
+                  state["link"] = LINK_OK
+               snap = make_snapshot(state, ip)
+               snap["fail"] = fails
+
             next_poll = time.time() + POLL_PERIOD_S
 
             # Only every FULL_REFRESH_EVERY-th scheduled redraw pays the
