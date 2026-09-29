@@ -676,14 +676,27 @@ static const uint32_t TOGGLE_DEBOUNCE_MS    = 120;
 // that landed during one would simply be lost - the device feeling like it
 // ignores the switch exactly when someone is clicking through it fastest.
 static volatile bool toggle_latch = false;
+// Which way the last press asked to go. Both pins used to share one handler
+// and every press advanced +1, so flicking up walked FORWARD through the
+// screens exactly like flicking down - there was no way back, only the long
+// way round.
+static volatile int toggle_latched_dir = SCREEN_FORWARD;
 
-static void IRAM_ATTR toggle_isr() { toggle_latch = true; }
+static void IRAM_ATTR toggle_isr_up() {
+  toggle_latch = true;
+  toggle_latched_dir = SCREEN_BACK;
+}
+
+static void IRAM_ATTR toggle_isr_down() {
+  toggle_latch = true;
+  toggle_latched_dir = SCREEN_FORWARD;
+}
 
 static void install_toggle_irq() {
   pinMode(BTN_UP_PIN, INPUT);
   pinMode(BTN_DOWN_PIN, INPUT);
-  attachInterrupt(digitalPinToInterrupt(BTN_UP_PIN), toggle_isr, FALLING);
-  attachInterrupt(digitalPinToInterrupt(BTN_DOWN_PIN), toggle_isr, FALLING);
+  attachInterrupt(digitalPinToInterrupt(BTN_UP_PIN), toggle_isr_up, FALLING);
+  attachInterrupt(digitalPinToInterrupt(BTN_DOWN_PIN), toggle_isr_down, FALLING);
 }
 
 // Active low; every pin reads 1 at rest, confirmed by probing.
@@ -691,11 +704,25 @@ static bool toggle_pressed() {
   return digitalRead(BTN_UP_PIN) == LOW || digitalRead(BTN_DOWN_PIN) == LOW;
 }
 
+// Direction of whichever pin is down right now, for the fallback path that
+// works off the level rather than the latch. 0 = nothing held.
+static int toggle_dir_now() {
+  if (digitalRead(BTN_UP_PIN) == LOW)   return SCREEN_BACK;
+  if (digitalRead(BTN_DOWN_PIN) == LOW) return SCREEN_FORWARD;
+  return 0;
+}
+
 // True if the switch has been operated since the last call, held or not.
 static bool toggle_take() {
   if (!toggle_latch) return false;
   toggle_latch = false;
   return true;
+}
+
+// Wraps in both directions: a bare % would leave -1 as -1 and index off the
+// front of the screen list.
+static int screen_step(int screen, int dir) {
+  return (screen + dir + SCREEN_COUNT) % SCREEN_COUNT;
 }
 
 static void arm_toggle_wake() {
@@ -814,8 +841,14 @@ static int run_toggle_session(int screen, const State &s, const Config &c,
 
   while ((int32_t)(deadline - millis()) > 0 &&
          (int32_t)(hard_stop - millis()) > 0) {
-    if (toggle_take() || toggle_pressed()) {
-      screen = (screen + 1) % SCREEN_COUNT;
+    bool latched = toggle_take();
+    // Read the level FIRST when there is no latch: by the time the pin is
+    // sampled after a redraw the switch may already be back at rest, and the
+    // latched direction is then the only record of which way it went.
+    int dir = latched ? toggle_latched_dir : toggle_dir_now();
+    if (latched || dir != 0) {
+      if (dir == 0) dir = SCREEN_FORWARD;
+      screen = screen_step(screen, dir);
 
       // Wait for release BEFORE drawing, so holding the switch does not
       // queue a second advance. BOUNDED: a stuck-low pin must not park the
@@ -849,8 +882,10 @@ static int run_toggle_session(int screen, const State &s, const Config &c,
         break;
       }
       // The redraw is the window in which a fast flick can land; log it so
-      // the size of that window is never again a matter of guesswork.
-      Serial.printf("toggle: screen %d, redraw %u ms\n", screen, draw_ms);
+      // the size of that window is never again a matter of guesswork. The
+      // direction rides along so a mis-ordered walk can be read off the log.
+      Serial.printf("toggle: %s -> screen %d, redraw %u ms\n",
+                    dir == SCREEN_BACK ? "back" : "fwd", screen, draw_ms);
       deadline = millis() + TOGGLE_AWAKE_MS;
     }
     delay(10);
@@ -931,7 +966,15 @@ void setup() {
   // the screens gains from data a few minutes fresher; the scheduled poll is
   // what keeps it current.
   if (woke_on_toggle && !cold_boot) {
-    rtc.screen = (rtc.screen + 1) % SCREEN_COUNT;
+    // The first step of a session comes from the WAKE CAUSE, not from the
+    // pins: the interrupt handler is not installed yet, and by the time the
+    // levels are sampled the switch has usually sprung back. ext0 is armed on
+    // the up pin and ext1 on the down pin, so the cause alone says which way
+    // the flick went - which is the whole reason they were armed separately.
+    int dir = (cause == ESP_SLEEP_WAKEUP_EXT0) ? SCREEN_BACK : SCREEN_FORWARD;
+    rtc.screen = screen_step(rtc.screen, dir);
+    Serial.printf("toggle wake: %s -> screen %d\n",
+                  dir == SCREEN_BACK ? "back" : "fwd", rtc.screen);
     compose(rtc.screen, rtc.snap, cfg, false, rtc.session_start);
     rtc.screen = run_toggle_session(rtc.screen, rtc.snap, cfg, rtc.session_start);
     sleep_until(rtc.next_poll);   // does not return
