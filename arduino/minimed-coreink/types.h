@@ -82,6 +82,10 @@ struct State {
   char ssid[33];             // the network actually in use, for the info screen
   int dstDelta;
   int link;                  // one of LINK_*, why there is no reading
+  // Which battery step is showing. Carried rather than recomputed per draw
+  // so the hysteresis has something to be sticky against, and so a toggle
+  // redraw cannot disagree with the scheduled one. -1 = not sampled yet.
+  int battState;
   // 24h distribution, for the stats screen
   int timeInRange, aboveHyper, belowHypo, averageSG;
 };
@@ -96,4 +100,5 @@ inline void state_init(State &s) {
   s.sageHours = 255;
   s.timeInRange = s.aboveHyper = s.belowHypo = s.averageSG = -1;
   s.link = LINK_OK;
+  s.battState = -1;
 }

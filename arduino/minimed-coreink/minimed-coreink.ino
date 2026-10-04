@@ -505,6 +505,11 @@ static bool fetch_pump_data(const Config &c, State &s) {
   return true;
 }
 
+// What the last battery decision was actually made on. File scope because
+// dump_state() reports it and refresh_battery() sets it, and they sit at
+// opposite ends of this file.
+static int last_batt_mv = -1;
+
 static void dump_state(const State &s, const Config &c) {
   char when[32] = "-";
   if (s.lastUpdate) {
@@ -517,11 +522,19 @@ static void dump_state(const State &s, const Config &c) {
   };
   Serial.println("---- state ----");
   Serial.printf("  link          %s\n", LINK_NAMES[s.link]);
-  // Device battery, not the pump's. Logged because the panel only warns
-  // below BATTERY_WARN_PCT and only when nothing else occupies that strip,
-  // so without this there is no way to tell a healthy battery from a warning
-  // that had nowhere to go.
-  Serial.printf("  device batt   %d%%\n", M5.Power.getBatteryLevel());
+  // Device battery, not the pump's. The panel shows only three coarse steps,
+  // and only when nothing else occupies that strip, so the log is the only
+  // place the actual level is visible.
+  //
+  // Voltage AND the library percentage: the display keys off the millivolts
+  // (see BATTERY_FULL_MV), and the percentage rides along only so the two can
+  // be compared while a real discharge curve is gathered for this cell.
+  // The mV the step was decided on, NOT a fresh sample: re-reading here
+  // printed a different median from the one that made the decision, which
+  // made the log look self-contradictory at exactly the boundary where it
+  // matters most.
+  Serial.printf("  device batt   %d mV (lib says %d%%), step %d\n",
+                last_batt_mv, (int)M5.Power.getBatteryLevel(), s.battState);
   Serial.printf("  last good sg  %d mg/dL\n", s.lastGoodSg);
   Serial.printf("  haveData      %d\n", (int)s.haveData);
   Serial.printf("  sg            %d mg/dL   trend %s\n", s.sg, s.trend);
@@ -762,7 +775,7 @@ static void arm_toggle_wake() {
 //
 // A plain struct, where MicroPython had to serialise JSON in and out of RTC
 // memory and re-hydrate it - about 120 lines that simply do not exist here.
-#define RTC_MAGIC 0x4D4D0305u   // bump when the layout changes (State gained .lastGoodSg)
+#define RTC_MAGIC 0x4D4D0306u   // bump when the layout changes (State gained .battState)
 
 struct RtcState {
   uint32_t magic;
@@ -875,6 +888,7 @@ static int run_toggle_session(int screen, const State &s, const Config &c,
       toggle_take();
 
       uint32_t t_draw = millis();
+      refresh_battery();
       compose(screen, s, c, false, session_start);
       uint32_t draw_ms = millis() - t_draw;
 
@@ -897,6 +911,19 @@ static int run_toggle_session(int screen, const State &s, const Config &c,
     delay(10);
   }
   return screen;
+}
+
+
+// Refresh the battery step just before drawing. Sampling here rather than
+// inside the draw keeps it on the one code path that is guaranteed to be
+// after the radio is down, and gives the hysteresis a previous value to be
+// sticky against.
+static void refresh_battery(void) {
+  int mv = battery_mv();
+  if (mv > 0) {
+    last_batt_mv = mv;
+    rtc.snap.battState = battery_state(mv, rtc.snap.battState);
+  }
 }
 
 void setup() {
@@ -981,6 +1008,7 @@ void setup() {
     rtc.screen = screen_step(rtc.screen, dir);
     Serial.printf("toggle wake: %s -> screen %d\n",
                   dir == SCREEN_BACK ? "back" : "fwd", rtc.screen);
+    refresh_battery();
     compose(rtc.screen, rtc.snap, cfg, false, rtc.session_start);
     rtc.screen = run_toggle_session(rtc.screen, rtc.snap, cfg, rtc.session_start);
     sleep_until(rtc.next_poll);   // does not return
@@ -1017,6 +1045,7 @@ void setup() {
     // until some later cycle succeeds. The snapshot is still there and is
     // still the best information anyone has - draw it.
     rtc.next_poll = time(nullptr) + POLL_PERIOD_S;
+    refresh_battery();
     compose(SCREEN_MAIN, rtc.snap, cfg, (rtc.cycle % FULL_REFRESH_EVERY) == 0,
             rtc.session_start);
     rtc.cycle++;
@@ -1078,6 +1107,17 @@ void setup() {
     // actually draw; computing it next to the assignment to rtc.snap printed
     // a stale 0 on the very cycle it was being established.
     s.lastGoodSg = s.sg > 0 ? s.sg : rtc.snap.lastGoodSg;
+    // Same trap as lastGoodSg: rtc.snap is replaced wholesale below, so
+    // without this the battery step resets to "no history" every cycle and
+    // the hysteresis has nothing to be sticky against.
+    //
+    // Sampled here, before dump_state(), so the log reports the step that
+    // will actually be drawn. The radio is already down by this point, which
+    // is the condition the reading needs. refresh_battery() runs again just
+    // before compose() on every path; a second median costs ~10ms and keeps
+    // the toggle redraws honest.
+    refresh_battery();
+    s.battState  = rtc.snap.battState;
 #if LAYOUT_TEST
     // Fault table spot-check against the Python's answers, and a synthetic
     // alarm so the banner and the buzzer are exercised without waiting for
@@ -1178,6 +1218,7 @@ void setup() {
 
   // Tested before the increment so cycle 0 - the first draw after a cold
   // boot, which has the splash still on the panel to clear - is a full one.
+  refresh_battery();
   compose(SCREEN_MAIN, rtc.snap, cfg, (rtc.cycle % FULL_REFRESH_EVERY) == 0,
           rtc.session_start);
   rtc.cycle++;

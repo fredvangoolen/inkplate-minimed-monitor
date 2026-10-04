@@ -622,8 +622,25 @@ SCREEN_BACK    = -1
 #
 # Empty below 50% because that is where this board falls off a cliff -
 # measured in use, it does not last long past it.
-BATTERY_FULL_PCT = 70   # 70-100: solid
-BATTERY_HALF_PCT = 50   # 50-69:  half; below: empty
+# MILLIVOLTS, not the percentage. M5Unified computes that percentage as
+#     (mv - 3300) * 100 / (4150 - 3350)       Power_Class.cpp:2341
+# which subtracts 3300 but divides by 800 - the two ends disagree - and it
+# saturates at 100% from 4100mV up, so a full battery and a charging one are
+# indistinguishable. Keyed to it, "50%" meant 3700mV, already at the knee of
+# the discharge curve: that is why this board appeared to die quickly just
+# below half. Datasheet-nominal until a real curve exists for this cell; see
+# the measurement notes in draw_info_screen().
+BATTERY_FULL_MV   = 3900   # >= this: solid
+BATTERY_HALF_MV   = 3700   # >= this: half; below: empty
+# isCharging() returns True on battery on this board (confirmed while the pack
+# was visibly discharging), so voltage is the only usable charger test.
+BATTERY_CHARGE_MV = 4250
+# Hysteresis. A step UP needs this much more than the bare threshold, so a
+# pack resting near a boundary does not flip the symbol on alternate wakes.
+# Not theoretical: readings on this board came in at 3897/3902/3912mV against
+# a 3900mV boundary - about the +-15mV the ADC repeats to.
+BATTERY_HYST_MV   = 40
+BATT_EMPTY, BATT_HALF, BATT_FULL = 0, 1, 2
 BATT_W, BATT_H, BATT_NUB_W, BATT_NUB_H = 26, 13, 3, 5
 
 # The three-position switch, labelled G37/G39/G38 on the case: up is
@@ -693,6 +710,7 @@ def make_snapshot(state, ip):
       "banner": state["banner"],
       "link": state["link"],
       "lastsg": state.get("last_good_sg"),
+      "battstep": state.get("batt_step"),
       "dst": dstDelta,
       "stats": state["stats"],
       "ip": ip,
@@ -720,6 +738,7 @@ def state_from_snapshot(snap):
    st["banner"] = snap.get("banner")
    st["link"] = snap.get("link", LINK_OK)
    st["last_good_sg"] = snap.get("lastsg")
+   st["batt_step"] = snap.get("battstep")
    st["stats"] = snap.get("stats") or {}
    st["battery_pct"] = snap.get("batt")
    st["reservoir_units"] = snap.get("resu")
@@ -1390,6 +1409,9 @@ def new_state():
       # forward across cycles rather than recomputed, because the state is
       # rebuilt from scratch on every fetch.
       "last_good_sg": None,
+      # Which battery step is showing. Carried rather than recomputed per
+      # draw so the hysteresis has something to be sticky against.
+      "batt_step": None,
       "trend": "NONE",
       "active_insulin": None,
       "last_update_tm": None,
@@ -1577,7 +1599,41 @@ def handle_pumpdataupdate(proxyaddr, proxyport, timezone):
 #
 #################################################
 
-def draw_battery_icon(x, y, pct):
+def battery_mv():
+   # A median of several reads: the underlying ADC is single-shot with no
+   # averaging - a bare ADC on GPIO35 behind a 25.1k/5.1k divider, no fuel
+   # gauge. Measured on this board, a resting pack spreads 4276-4306mV with a
+   # 4.9mV stdev, so it repeats to about +-15mV even though absolute accuracy
+   # is worth perhaps +-50-100mV.
+   #
+   # Called at DRAW time, which on every path is after the radio is down.
+   # That matters: WiFi transmit bursts sag the rail, and a reading taken
+   # mid-fetch reads low enough to drop the icon a whole step.
+   try:
+      reads = []
+      for _ in range(5):
+         reads.append(M5.Power.getBatteryVoltage())
+         time.sleep_ms(2)
+      reads.sort()
+      return reads[2]
+   except Exception:
+      return -1
+
+
+def battery_state(mv, prev):
+   # Which of the three steps to draw, given the previous step so the
+   # boundary is sticky. prev of None means no history (cold boot): decide on
+   # the bare thresholds rather than biasing the first reading either way.
+   full = BATTERY_FULL_MV + (BATTERY_HYST_MV if prev is not None and prev < BATT_FULL else 0)
+   half = BATTERY_HALF_MV + (BATTERY_HYST_MV if prev is not None and prev < BATT_HALF else 0)
+   if mv >= BATTERY_CHARGE_MV or mv >= full:
+      return BATT_FULL
+   if mv >= half:
+      return BATT_HALF
+   return BATT_EMPTY
+
+
+def draw_battery_icon(x, y, state):
    # The device battery, as a battery symbol: an outlined body with a nub on
    # the right, filled in three steps.
    #
@@ -1590,9 +1646,9 @@ def draw_battery_icon(x, y, pct):
    # Inset by 2 so the fill never touches the 1px border, which would make a
    # full cell and a half cell hard to tell apart on e-paper.
    inner_w, inner_h = BATT_W - 4, BATT_H - 4
-   if pct >= BATTERY_FULL_PCT:
+   if state == BATT_FULL:
       gfx().fillRect(x + 2, y + 2, inner_w, inner_h, BLACK)
-   elif pct >= BATTERY_HALF_PCT:
+   elif state == BATT_HALF:
       gfx().fillRect(x + 2, y + 2, inner_w // 2, inner_h, BLACK)
 
 
@@ -1745,18 +1801,17 @@ def draw_screen(state):
    # redraw shows the level now rather than at the last fetch. A negative
    # reading means "cannot tell" and must not read as a flat battery.
    if not has_banner:
-      try:
-         dev_batt = M5.Power.getBatteryLevel()
-      except Exception:
-         dev_batt = -1
+      # The step was decided before this draw and carried in the state, so a
+      # toggle redraw cannot disagree with the scheduled one.
+      batt_step = state.get("batt_step")
       # Guard the fit rather than assume it. The gap here is ~24px against the
       # Arduino build's ~41px, because the glucose figure above is a different
       # typeface at a different size, and this file still cannot be checked on
       # hardware - no patched UIFlow image exists. Dropping the icon is a far
       # better failure than drawing it through the insulin row.
-      if dev_batt >= 0 and BATT_H <= (row_a_y - sep_y):
+      if batt_step is not None and BATT_H <= (row_a_y - sep_y):
          draw_battery_icon(PANEL_W - MARGIN - (BATT_W + BATT_NUB_W),
-                           sep_y + ((row_a_y - sep_y) - BATT_H) // 2, dev_batt)
+                           sep_y + ((row_a_y - sep_y) - BATT_H) // 2, batt_step)
 
    insulin_txt = "%.1f U" % state["active_insulin"] if state["active_insulin"] is not None else "-- U"
    draw_kv_row(row_a_y, "Act. insulin", FONT_LABEL, insulin_txt, FONT_VALUE, BLACK)
@@ -2050,6 +2105,15 @@ FULL_REFRESH_EVERY = 12
 
 
 def draw_current_screen(screen, state, cfg, ip, full_refresh=False):
+   # Sample the battery and decide its step here: this is the one choke point
+   # every draw passes through, and on every path the radio is already down by
+   # the time it is reached - which is the condition the reading needs, since
+   # WiFi transmit bursts sag the rail. Feeding the previous step back in is
+   # what makes the hysteresis work.
+   mv = battery_mv()
+   if mv > 0:
+      state["batt_step"] = battery_state(mv, state.get("batt_step"))
+
    if screen == SCREEN_STATS:
       compose(lambda: draw_stats_screen(state), full_refresh)
    elif screen == SCREEN_PUMP:
@@ -2657,6 +2721,12 @@ def main():
             # full one.
             draw_current_screen(screen, state, cfg, ip,
                                 full_refresh=(cycle % FULL_REFRESH_EVERY == 0))
+            # draw_current_screen() is what decides the battery step, and the
+            # snapshot above was built before it ran - so carry the result
+            # back, or the step saved for the next wake is always one cycle
+            # stale and the hysteresis chains off the wrong value.
+            if snap is not None:
+               snap["battstep"] = state.get("batt_step")
             cycle += 1
 
             # No toggle session here on purpose - the device sleeps straight

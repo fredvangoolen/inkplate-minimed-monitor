@@ -39,10 +39,30 @@ static const int HYPO_THRESHOLD_MGDL  = 70;
 // proportional bar: at a glance you want "fine / getting on / do something",
 // and this panel is read in passing rather than studied.
 //
-// Empty below 50% because that is where this board falls off a cliff -
-// measured in use, it does not last long past it.
-static const int BATTERY_FULL_PCT = 70;   // 70-100: solid
-static const int BATTERY_HALF_PCT = 50;   // 50-69:  half; below: empty
+// MILLIVOLTS, not the percentage. M5Unified computes that percentage as
+//     (mv - 3300) * 100 / (4150 - 3350)       Power_Class.cpp:2341
+// which subtracts 3300 but divides by 800 - the two ends disagree - and it
+// saturates at 100% from 4100mV up, so a full battery and a charging one are
+// indistinguishable. It is also a straight line across a Li-ion curve that is
+// nearly flat from 3.9V to 3.6V. Keyed to it, "50%" meant 3700mV, which is
+// already at the knee: that is why this board appeared to die quickly just
+// below half.
+//
+// Datasheet-nominal until a real discharge curve exists for this cell. The
+// voltage is logged every cycle so one can be gathered; see the measurement
+// notes in main_m5coreink.py's draw_info_screen().
+static const int BATTERY_FULL_MV    = 3900;   // >= this: solid
+static const int BATTERY_HALF_MV    = 3700;   // >= this: half; below: empty
+// isCharging() returns true on battery on this board (confirmed while the
+// pack was visibly discharging), so voltage is the only usable charger test.
+static const int BATTERY_CHARGE_MV  = 4250;
+// Hysteresis. A step UP needs this much more than the bare threshold, so a
+// pack resting near a boundary does not flip the symbol on alternate wakes.
+// Not theoretical: the first real reading came in at 3897mV against a 3900mV
+// boundary, with the ADC repeatable to about +-15mV.
+static const int BATTERY_HYST_MV    = 40;
+
+enum { BATT_EMPTY = 0, BATT_HALF = 1, BATT_FULL = 2 };
 
 // 1 = print computed layout geometry (arrow sizing, banner wrapping) to
 // serial. There is no REPL on this board and no screenshots, so these
@@ -71,6 +91,8 @@ static const int SCREEN_BACK    = -1;
 // M5GFX clips silently.
 void draw_status_screen(LovyanGFX &g, const char *msg);
 
+int  battery_mv();   // median of several ADC reads, millivolts
+int  battery_state(int mv, int prev);   // BATT_*, with hysteresis
 void draw_main_screen(LovyanGFX &g, const State &s, const Config &c);
 void draw_current_screen(LovyanGFX &g, int screen, const State &s,
                          const Config &c, time_t session_start);

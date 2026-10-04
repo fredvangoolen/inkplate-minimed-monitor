@@ -196,7 +196,41 @@ static void time_delta_txt(const struct tm &upd, const struct tm &now,
 // included, so the caller can right-align it.
 static const int BATT_W = 26, BATT_H = 13, BATT_NUB_W = 3, BATT_NUB_H = 5;
 
-static int draw_battery_icon(LovyanGFX &g, int x, int y, int pct) {
+// A median of several reads, because _getBatteryAdcRaw() is a single-shot
+// conversion with no averaging: this is a bare ADC on GPIO35 behind a
+// 25.1k/5.1k divider, no fuel gauge. Measured on this board, a resting pack
+// spreads 4276-4306mV with a 4.9mV stdev, so it is repeatable to about
+// +-15mV even though absolute accuracy is worth perhaps +-50-100mV.
+//
+// Called at DRAW time, which on both paths is after the radio is down. That
+// matters: WiFi transmit bursts sag the rail, and a reading taken mid-fetch
+// reads low enough to drop the icon a whole step.
+int battery_mv() {
+  int s[5];
+  for (int i = 0; i < 5; i++) {
+    s[i] = (int)M5.Power.getBatteryVoltage();
+    delay(2);
+  }
+  for (int i = 1; i < 5; i++) {          // insertion sort, five elements
+    int v = s[i], j = i - 1;
+    while (j >= 0 && s[j] > v) { s[j + 1] = s[j]; j--; }
+    s[j + 1] = v;
+  }
+  return s[2];
+}
+
+// Which of the three steps to draw, given the previous step so the boundary
+// is sticky. prev < 0 means no history (cold boot): decide on the bare
+// thresholds rather than biasing the first reading either way.
+int battery_state(int mv, int prev) {
+  int full = BATTERY_FULL_MV + (prev >= 0 && prev < BATT_FULL ? BATTERY_HYST_MV : 0);
+  int half = BATTERY_HALF_MV + (prev >= 0 && prev < BATT_HALF ? BATTERY_HYST_MV : 0);
+  if (mv >= BATTERY_CHARGE_MV || mv >= full) return BATT_FULL;
+  if (mv >= half) return BATT_HALF;
+  return BATT_EMPTY;
+}
+
+static int draw_battery_icon(LovyanGFX &g, int x, int y, int state) {
   g.drawRect(x, y, BATT_W, BATT_H, COLOR_BLACK);
   // Nub on the right, vertically centred against the body.
   g.fillRect(x + BATT_W, y + (BATT_H - BATT_NUB_H) / 2,
@@ -206,9 +240,9 @@ static int draw_battery_icon(LovyanGFX &g, int x, int y, int pct) {
   // full cell and a half cell hard to tell apart on e-paper.
   int inner_x = x + 2, inner_y = y + 2;
   int inner_w = BATT_W - 4, inner_h = BATT_H - 4;
-  if (pct >= BATTERY_FULL_PCT) {
+  if (state == BATT_FULL) {
     g.fillRect(inner_x, inner_y, inner_w, inner_h, COLOR_BLACK);
-  } else if (pct >= BATTERY_HALF_PCT) {
+  } else if (state == BATT_HALF) {
     g.fillRect(inner_x, inner_y, inner_w / 2, inner_h, COLOR_BLACK);
   }
   return BATT_W + BATT_NUB_W;
@@ -346,15 +380,12 @@ void draw_main_screen(LovyanGFX &g, const State &s, const Config &c) {
   // getBatteryLevel() reports -1 when it cannot tell, which must not read as
   // a flat battery. Sampled here at draw time rather than carried in the
   // state, so a toggle redraw shows the level now, not at the last fetch.
-  int batt_pct = M5.Power.getBatteryLevel();
-  if (!has_banner && batt_pct >= 0) {
+  // The step was decided before this draw and carried in the state, so a
+  // toggle redraw cannot disagree with the scheduled one.
+  if (!has_banner && s.battState >= 0) {
     int bx = PANEL_W - MARGIN - (BATT_W + BATT_NUB_W);
     int by = sep_y + ((row_a_y - sep_y) - BATT_H) / 2;
-    draw_battery_icon(g, bx, by, batt_pct);
-#if DEBUG_LAYOUT
-    Serial.printf("battery: %d%% icon at %d,%d gap %d..%d\n",
-                  batt_pct, bx, by, sep_y, row_a_y);
-#endif
+    draw_battery_icon(g, bx, by, s.battState);
   }
 
   char insulin_txt[16];
