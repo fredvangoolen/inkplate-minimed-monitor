@@ -187,6 +187,33 @@ static void time_delta_txt(const struct tm &upd, const struct tm &now,
   else                              snprintf(out, n, "%d min ago", dmin);
 }
 
+// The device battery, as a battery symbol: an outlined body with a nub on the
+// right, filled in three steps.
+//
+// Deliberately small. It competes for attention with the one number this
+// device exists to show, and it is housekeeping - a glance should find the
+// glucose reading first and this second. Returns the width drawn, nub
+// included, so the caller can right-align it.
+static const int BATT_W = 26, BATT_H = 13, BATT_NUB_W = 3, BATT_NUB_H = 5;
+
+static int draw_battery_icon(LovyanGFX &g, int x, int y, int pct) {
+  g.drawRect(x, y, BATT_W, BATT_H, COLOR_BLACK);
+  // Nub on the right, vertically centred against the body.
+  g.fillRect(x + BATT_W, y + (BATT_H - BATT_NUB_H) / 2,
+             BATT_NUB_W, BATT_NUB_H, COLOR_BLACK);
+
+  // Inset by 2 so the fill never touches the 1px border, which would make a
+  // full cell and a half cell hard to tell apart on e-paper.
+  int inner_x = x + 2, inner_y = y + 2;
+  int inner_w = BATT_W - 4, inner_h = BATT_H - 4;
+  if (pct >= BATTERY_FULL_PCT) {
+    g.fillRect(inner_x, inner_y, inner_w, inner_h, COLOR_BLACK);
+  } else if (pct >= BATTERY_HALF_PCT) {
+    g.fillRect(inner_x, inner_y, inner_w / 2, inner_h, COLOR_BLACK);
+  }
+  return BATT_W + BATT_NUB_W;
+}
+
 // What to say instead of leaving a bare "---" to mean four different things.
 //
 // Worded for whoever is standing in front of the panel rather than for the
@@ -283,6 +310,18 @@ void draw_main_screen(LovyanGFX &g, const State &s, const Config &c) {
   int unit_y = band_y + band_h + 2;
   draw_text(g, "mg/dL", MARGIN, unit_y, FONT_UNIT, COLOR_BLACK);
 
+  // While the reading is "---", show what it last WAS, bracketed and right
+  // aligned on the unit line. The brackets are doing real work: they mark the
+  // number as historical, so it can never be mistaken at a glance for a
+  // current reading. Shown whenever there is no reading, independently of the
+  // "No sensor data" banner, which only appears once the gap has repeated.
+  if (s.sg <= 0 && s.lastGoodSg > 0) {
+    char prev[12];
+    snprintf(prev, sizeof(prev), "[%d]", s.lastGoodSg);
+    int pw = text_width(g, prev, FONT_UNIT);
+    draw_text(g, prev, PANEL_W - MARGIN - pw, unit_y, FONT_UNIT, COLOR_BLACK);
+  }
+
   int sep_y = unit_y + font_height(g, FONT_UNIT) + 6;
   g.drawLine(MARGIN, sep_y, PANEL_W - MARGIN, sep_y, COLOR_BLACK);
 
@@ -294,6 +333,29 @@ void draw_main_screen(LovyanGFX &g, const State &s, const Config &c) {
   int row_b_h = font_height(g, FONT_LABEL);
   int row_a_y = has_banner ? sep_y + 8
                            : PANEL_H - MARGIN - row_b_h - 6 - row_a_h;
+
+  // "Charge device", centred in the gap under the separator.
+  //
+  // Only when that gap exists: with a banner showing, row_a is pulled up to
+  // sep_y + 8 and there is no room at all, so this would overprint the
+  // insulin row. The ask was to suppress it during an alarm; suppressing it
+  // for ANY banner is the same judgement - an alarm, a dead proxy or a pump
+  // banner all leave a screen too crowded to add to - and it is also the only
+  // layout that fits. The warning returns the moment the banner clears.
+  //
+  // getBatteryLevel() reports -1 when it cannot tell, which must not read as
+  // a flat battery. Sampled here at draw time rather than carried in the
+  // state, so a toggle redraw shows the level now, not at the last fetch.
+  int batt_pct = M5.Power.getBatteryLevel();
+  if (!has_banner && batt_pct >= 0) {
+    int bx = PANEL_W - MARGIN - (BATT_W + BATT_NUB_W);
+    int by = sep_y + ((row_a_y - sep_y) - BATT_H) / 2;
+    draw_battery_icon(g, bx, by, batt_pct);
+#if DEBUG_LAYOUT
+    Serial.printf("battery: %d%% icon at %d,%d gap %d..%d\n",
+                  batt_pct, bx, by, sep_y, row_a_y);
+#endif
+  }
 
   char insulin_txt[16];
   if (s.activeInsulin >= 0) snprintf(insulin_txt, sizeof(insulin_txt), "%.1f U", s.activeInsulin);

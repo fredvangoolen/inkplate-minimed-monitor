@@ -35,6 +35,15 @@ static const uint32_t COLOR_WHITE = 0xFFFFFFu;
 static const int HYPER_THRESHOLD_MGDL = 180;
 static const int HYPO_THRESHOLD_MGDL  = 70;
 
+// Fill steps for the battery symbol on the main screen. Three states, not a
+// proportional bar: at a glance you want "fine / getting on / do something",
+// and this panel is read in passing rather than studied.
+//
+// Empty below 50% because that is where this board falls off a cliff -
+// measured in use, it does not last long past it.
+static const int BATTERY_FULL_PCT = 70;   // 70-100: solid
+static const int BATTERY_HALF_PCT = 50;   // 50-69:  half; below: empty
+
 // 1 = print computed layout geometry (arrow sizing, banner wrapping) to
 // serial. There is no REPL on this board and no screenshots, so these
 // numbers are how a layout gets checked without asking a human to look at
