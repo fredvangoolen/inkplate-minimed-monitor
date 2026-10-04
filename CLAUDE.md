@@ -4,11 +4,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A remote monitor for the Medtronic Minimed 770G/780G insulin pump, for a caregiver of a Type-1 Diabetes patient. It runs on a **Soldered Inkplate 2** (2.13" 3-color e-paper, classic ESP32) under [Inkplate-micropython](https://github.com/SolderedElectronics/Inkplate-micropython): wakes every ~5 minutes, polls an external **Carelink proxy** for pump status, redraws a single always-current view, and goes back to deep sleep.
+A remote monitor for the Medtronic Minimed 770G/780G insulin pump, for a caregiver of a Type-1 Diabetes patient. It wakes every ~5 minutes, polls an external **Carelink proxy** for pump status, redraws a single always-current view, and goes back to deep sleep.
 
-The whole project is one file, `main.py` — there's no build step, package manifest, or test suite.
+**What actually runs today is `arduino/minimed-coreink/` — the C++ port, on two M5Stack Core Ink boards.** Start there. The two MicroPython builds below are kept as references and fallbacks, not as the deployed thing; the Inkplate in particular is retired hardware.
+
+There are three implementations of the same application, and they do not share code:
+
+| | Board | Status |
+|---|---|---|
+| `arduino/minimed-coreink/` | M5Stack Core Ink | **deployed** — read its `README.md` and `architecture.md` first |
+| `main_m5coreink.py` | M5Stack Core Ink | reference / fallback, MicroPython |
+| `main.py` | Soldered Inkplate 2 | retired hardware, MicroPython |
+
+`main.py` is a single file with no build step, package manifest or test suite. Neither MicroPython build has a test suite; the Arduino one has no automated tests either, and its `README.md` explains what is verified on hardware instead.
 
 `main_m5coreink.py` is a sibling port of the same application to an **M5Stack Core Ink** (1.54" 200×200 monochrome e-paper, ESP32-PICO-D4, UIFlow2 MicroPython firmware), which has a buzzer and so can sound pump alarms audibly. It is a separate, self-contained file — board-independent logic is duplicated, not shared, and must be updated in both. **Its hardware facts are not the Inkplate's** (different time epoch, no red ink, different fonts, single-precision floats); never copy hardware reasoning between the two files. See `PORTING-M5COREINK.md` for its firmware build, the required `boot_option` NVS setting, the deploy steps, and the on-device testing techniques (module import for display work, stubbing `http_get` to exercise the data path with no network).
+
+Note the fallback is currently theoretical: no patched UIFlow firmware image is kept anywhere, so putting a board back on MicroPython would mean rebuilding one first.
+
+`arduino/minimed-coreink/` is the C++ port of `main_m5coreink.py` and what both boards run. Build and flash with:
+
+```
+FQBN=esp32:esp32:m5stack_coreink:PartitionScheme=huge_app
+arduino-cli compile --fqbn "$FQBN" --upload -p /dev/ttyACM0 arduino/minimed-coreink
+```
+
+`huge_app` is not optional — the default scheme leaves too little room for the WiFi + JSON build. Its `README.md` carries the build details, the measured timings and the hardware quirks; `architecture.md` carries the entry point and file layout. **The duplicate-logic rule spans all three implementations, and the "never copy reasoning between builds" rule bites hardest here**: the same two bytes from the proxy (`""`, a dead token) are rejected outright by ArduinoJson and parsed happily by MicroPython's `json.loads`, so the same-looking check has to be written differently in each. Config lives in NVS (`Preferences`, namespace `minimed`), not in a JSON file — a single setting can be changed without re-entering WiFi credentials by flashing a one-shot sketch that writes that key, then reflashing the real firmware; an app upload does not touch NVS.
 
 ## Origin
 
