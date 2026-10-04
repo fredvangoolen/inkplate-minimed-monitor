@@ -414,6 +414,14 @@ GLUCOSE_BIG_SIZE = 2
 FONT_UNIT    = Widgets.FONTS.DejaVu18   # 20px
 FONT_VALUE   = Widgets.FONTS.DejaVu24   # 26px
 FONT_LABEL   = Widgets.FONTS.DejaVu12   # 16px
+# The battery warning. The Arduino build gives this the only bold face in the
+# project (FreeSansBold12pt7b); that is NOT available here and cannot be made
+# so from this file - the MicroPython binding table in m5unified_display.c
+# exposes no bold entry at all, though M5GFX itself compiles several. (The
+# same table is why the "DejaVu" names here are really Montserrat aliases,
+# which is the root of the metric differences documented between the builds.)
+# So this build gets size instead of weight: one step up from the label font.
+FONT_WARN    = Widgets.FONTS.DejaVu18   # 20px - no bold exists on this side
 FONT_ALARM_L = Widgets.FONTS.DejaVu18   # 20px - short alarms
 FONT_ALARM_S = Widgets.FONTS.DejaVu12   # 16px - long alarms, shown in full
 
@@ -1726,11 +1734,18 @@ def draw_screen(state):
       except Exception:
          dev_batt = -1
       if 0 <= dev_batt < BATTERY_WARN_PCT:
-         warn = "Charge device"
-         warn_h = font_height(FONT_LABEL)
-         warn_y = sep_y + ((row_a_y - sep_y) - warn_h) // 2
-         draw_text(warn, (PANEL_W - text_width(warn, FONT_LABEL)) // 2,
-                   warn_y, FONT_LABEL, BLACK)
+         warn = "Battery low"
+         warn_h = font_height(FONT_WARN)
+         # Guard the fit rather than assume it. The gap here is ~24px against
+         # the Arduino build's ~41px, because the glucose figure above is a
+         # different typeface at a different size, and this file cannot
+         # currently be checked on hardware - no patched UIFlow image exists.
+         # Skipping the warning is a far better failure than printing it
+         # through the insulin row.
+         if warn_h <= (row_a_y - sep_y):
+            warn_y = sep_y + ((row_a_y - sep_y) - warn_h) // 2
+            draw_text(warn, (PANEL_W - text_width(warn, FONT_WARN)) // 2,
+                      warn_y, FONT_WARN, BLACK)
 
    insulin_txt = "%.1f U" % state["active_insulin"] if state["active_insulin"] is not None else "-- U"
    draw_kv_row(row_a_y, "Act. insulin", FONT_LABEL, insulin_txt, FONT_VALUE, BLACK)

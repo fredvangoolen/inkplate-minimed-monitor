@@ -19,6 +19,12 @@ static const float        GLUCOSE_BIG_SIZE = 1.0f;
 static const lgfx::IFont *FONT_UNIT        = &fonts::DejaVu18;   // 20px
 static const lgfx::IFont *FONT_VALUE       = &fonts::DejaVu24;   // 26px
 static const lgfx::IFont *FONT_LABEL       = &fonts::DejaVu12;   // 16px
+// The battery warning is the one thing on this screen that is neither a
+// reading nor a label, and it has to be read from across a room by someone
+// not looking for it - so it gets the only bold face in the build. The DejaVu
+// set M5GFX ships has no bold weight at all; FreeSansBold is the nearest
+// match in shape.
+static const lgfx::IFont *FONT_WARN        = &fonts::FreeSansBold12pt7b;
 static const lgfx::IFont *FONT_ALARM_L     = &fonts::DejaVu18;   // short alarms
 static const lgfx::IFont *FONT_ALARM_S     = &fonts::DejaVu12;   // long alarms, in full
 
@@ -321,11 +327,11 @@ void draw_main_screen(LovyanGFX &g, const State &s, const Config &c) {
   // state, so a toggle redraw shows the level now, not at the last fetch.
   int batt_pct = M5.Power.getBatteryLevel();
   if (!has_banner && batt_pct >= 0 && batt_pct < BATTERY_WARN_PCT) {
-    const char *warn = "Charge device";
-    int ww = text_width(g, warn, FONT_LABEL);
-    int wh = font_height(g, FONT_LABEL);
+    const char *warn = "Battery low";
+    int ww = text_width(g, warn, FONT_WARN);
+    int wh = font_height(g, FONT_WARN);
     int wy = sep_y + ((row_a_y - sep_y) - wh) / 2;
-    draw_text(g, warn, (PANEL_W - ww) / 2, wy, FONT_LABEL, COLOR_BLACK);
+    draw_text(g, warn, (PANEL_W - ww) / 2, wy, FONT_WARN, COLOR_BLACK);
 #if DEBUG_LAYOUT
     Serial.printf("charge: batt=%d%% gap %d..%d -> y=%d h=%d\n",
                   batt_pct, sep_y, row_a_y, wy, wh);
