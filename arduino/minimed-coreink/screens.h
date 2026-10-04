@@ -35,6 +35,11 @@ static const uint32_t COLOR_WHITE = 0xFFFFFFu;
 static const int HYPER_THRESHOLD_MGDL = 180;
 static const int HYPO_THRESHOLD_MGDL  = 70;
 
+// Below this the main screen asks for the device to be charged. Early on
+// purpose: this is a monitor someone glances at rather than watches, so the
+// warning has to survive being missed several times over.
+static const int BATTERY_WARN_PCT = 50;
+
 // 1 = print computed layout geometry (arrow sizing, banner wrapping) to
 // serial. There is no REPL on this board and no screenshots, so these
 // numbers are how a layout gets checked without asking a human to look at

@@ -616,6 +616,11 @@ SCREEN_COUNT = 4
 SCREEN_FORWARD = 1
 SCREEN_BACK    = -1
 
+# Below this the main screen asks for the device to be charged. Early on
+# purpose: this is a monitor someone glances at rather than watches, so the
+# warning has to survive being missed several times over.
+BATTERY_WARN_PCT = 50
+
 # The three-position switch, labelled G37/G39/G38 on the case: up is
 # GPIO37, down is GPIO39, press is GPIO38. Confirmed by watching every
 # candidate GPIO while the control was operated - all three are momentary
@@ -682,6 +687,7 @@ def make_snapshot(state, ip):
       "alarm_at": epoch_of(state["alarm_tm"]),
       "banner": state["banner"],
       "link": state["link"],
+      "lastsg": state.get("last_good_sg"),
       "dst": dstDelta,
       "stats": state["stats"],
       "ip": ip,
@@ -708,6 +714,7 @@ def state_from_snapshot(snap):
    st["alarm_text"] = snap.get("alarm")
    st["banner"] = snap.get("banner")
    st["link"] = snap.get("link", LINK_OK)
+   st["last_good_sg"] = snap.get("lastsg")
    st["stats"] = snap.get("stats") or {}
    st["battery_pct"] = snap.get("batt")
    st["reservoir_units"] = snap.get("resu")
@@ -1373,6 +1380,11 @@ def new_state():
       "sage_hours": 255,
       "sage_state": "",
       "sg": None,
+      # The last reading that actually arrived, kept so the panel can still
+      # show what the number WAS while there is no current one. Carried
+      # forward across cycles rather than recomputed, because the state is
+      # rebuilt from scratch on every fetch.
+      "last_good_sg": None,
       "trend": "NONE",
       "active_insulin": None,
       "last_update_tm": None,
@@ -1669,6 +1681,17 @@ def draw_screen(state):
    unit_y = band_y + band_h + 2
    draw_text("mg/dL", MARGIN, unit_y, FONT_UNIT, BLACK)
 
+   # While the reading is "---", show what it last WAS, bracketed and right
+   # aligned on the unit line. The brackets do real work: they mark the number
+   # as historical, so it can never be mistaken at a glance for a current
+   # reading. Shown whenever there is no reading, independently of the
+   # "No sensor data" banner, which only appears once the gap has repeated.
+   last_good = state.get("last_good_sg")
+   if not state["sg"] and last_good:
+      prev = "[%d]" % last_good
+      draw_text(prev, PANEL_W - MARGIN - text_width(prev, FONT_UNIT),
+                unit_y, FONT_UNIT, BLACK)
+
    sep_y = unit_y + font_height(FONT_UNIT) + 6
    gfx().drawLine(MARGIN, sep_y, PANEL_W - MARGIN, sep_y, BLACK)
 
@@ -1685,6 +1708,30 @@ def draw_screen(state):
       row_a_y = sep_y + 8
    else:
       row_a_y = PANEL_H - MARGIN - row_b_h - 6 - row_a_h
+   # "Charge device", centred in the gap under the separator.
+   #
+   # Only when that gap exists: with a banner showing, row_a is pulled up to
+   # sep_y + 8 and there is no room at all, so this would overprint the
+   # insulin row. The ask was to suppress it during an alarm; suppressing it
+   # for ANY banner is the same judgement - an alarm, a dead proxy or a pump
+   # banner all leave a screen too crowded to add to - and it is also the only
+   # layout that fits. The warning returns the moment the banner clears.
+   #
+   # Read here at draw time rather than carried in the state, so a toggle
+   # redraw shows the level now rather than at the last fetch. A negative
+   # reading means "cannot tell" and must not read as a flat battery.
+   if not has_banner:
+      try:
+         dev_batt = M5.Power.getBatteryLevel()
+      except Exception:
+         dev_batt = -1
+      if 0 <= dev_batt < BATTERY_WARN_PCT:
+         warn = "Charge device"
+         warn_h = font_height(FONT_LABEL)
+         warn_y = sep_y + ((row_a_y - sep_y) - warn_h) // 2
+         draw_text(warn, (PANEL_W - text_width(warn, FONT_LABEL)) // 2,
+                   warn_y, FONT_LABEL, BLACK)
+
    insulin_txt = "%.1f U" % state["active_insulin"] if state["active_insulin"] is not None else "-- U"
    draw_kv_row(row_a_y, "Act. insulin", FONT_LABEL, insulin_txt, FONT_VALUE, BLACK)
 
@@ -2528,6 +2575,11 @@ def main():
             else:
                if not confirmed:
                   state["link"] = LINK_OK
+               # Carry the last real reading across the wholesale rebuild. The
+               # fetched state knows only what the proxy just said, so without
+               # this the moment sg goes to None the previous value is gone,
+               # and the bracketed "what it was" would vanish with it.
+               state["last_good_sg"] = state["sg"] or (snap.get("lastsg") if snap else None)
                snap = make_snapshot(state, ip)
                snap["fail"] = fails
 

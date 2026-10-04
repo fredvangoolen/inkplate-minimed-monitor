@@ -59,6 +59,11 @@ enum {
 struct State {
   bool haveData;
   int sg;                    // mg/dL, 0 = no reading
+  // The last reading that actually arrived, kept so the panel can still show
+  // what the number WAS while there is no current one. Survives sg going to
+  // 0, which is the whole point: it is carried forward across cycles rather
+  // than recomputed, because the state is replaced wholesale on every fetch.
+  int lastGoodSg;
   char trend[16];
   float activeInsulin;
   int batteryPct;

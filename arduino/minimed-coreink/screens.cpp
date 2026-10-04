@@ -283,6 +283,18 @@ void draw_main_screen(LovyanGFX &g, const State &s, const Config &c) {
   int unit_y = band_y + band_h + 2;
   draw_text(g, "mg/dL", MARGIN, unit_y, FONT_UNIT, COLOR_BLACK);
 
+  // While the reading is "---", show what it last WAS, bracketed and right
+  // aligned on the unit line. The brackets are doing real work: they mark the
+  // number as historical, so it can never be mistaken at a glance for a
+  // current reading. Shown whenever there is no reading, independently of the
+  // "No sensor data" banner, which only appears once the gap has repeated.
+  if (s.sg <= 0 && s.lastGoodSg > 0) {
+    char prev[12];
+    snprintf(prev, sizeof(prev), "[%d]", s.lastGoodSg);
+    int pw = text_width(g, prev, FONT_UNIT);
+    draw_text(g, prev, PANEL_W - MARGIN - pw, unit_y, FONT_UNIT, COLOR_BLACK);
+  }
+
   int sep_y = unit_y + font_height(g, FONT_UNIT) + 6;
   g.drawLine(MARGIN, sep_y, PANEL_W - MARGIN, sep_y, COLOR_BLACK);
 
@@ -294,6 +306,31 @@ void draw_main_screen(LovyanGFX &g, const State &s, const Config &c) {
   int row_b_h = font_height(g, FONT_LABEL);
   int row_a_y = has_banner ? sep_y + 8
                            : PANEL_H - MARGIN - row_b_h - 6 - row_a_h;
+
+  // "Charge device", centred in the gap under the separator.
+  //
+  // Only when that gap exists: with a banner showing, row_a is pulled up to
+  // sep_y + 8 and there is no room at all, so this would overprint the
+  // insulin row. The ask was to suppress it during an alarm; suppressing it
+  // for ANY banner is the same judgement - an alarm, a dead proxy or a pump
+  // banner all leave a screen too crowded to add to - and it is also the only
+  // layout that fits. The warning returns the moment the banner clears.
+  //
+  // getBatteryLevel() reports -1 when it cannot tell, which must not read as
+  // a flat battery. Sampled here at draw time rather than carried in the
+  // state, so a toggle redraw shows the level now, not at the last fetch.
+  int batt_pct = M5.Power.getBatteryLevel();
+  if (!has_banner && batt_pct >= 0 && batt_pct < BATTERY_WARN_PCT) {
+    const char *warn = "Charge device";
+    int ww = text_width(g, warn, FONT_LABEL);
+    int wh = font_height(g, FONT_LABEL);
+    int wy = sep_y + ((row_a_y - sep_y) - wh) / 2;
+    draw_text(g, warn, (PANEL_W - ww) / 2, wy, FONT_LABEL, COLOR_BLACK);
+#if DEBUG_LAYOUT
+    Serial.printf("charge: batt=%d%% gap %d..%d -> y=%d h=%d\n",
+                  batt_pct, sep_y, row_a_y, wy, wh);
+#endif
+  }
 
   char insulin_txt[16];
   if (s.activeInsulin >= 0) snprintf(insulin_txt, sizeof(insulin_txt), "%.1f U", s.activeInsulin);
