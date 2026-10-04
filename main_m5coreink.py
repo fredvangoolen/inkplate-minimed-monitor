@@ -632,9 +632,17 @@ SCREEN_BACK    = -1
 # the measurement notes in draw_info_screen().
 BATTERY_FULL_MV   = 3900   # >= this: solid
 BATTERY_HALF_MV   = 3700   # >= this: half; below: empty
-# isCharging() returns True on battery on this board (confirmed while the pack
-# was visibly discharging), so voltage is the only usable charger test.
-BATTERY_CHARGE_MV = 4250
+# Voltage is the ONLY usable charger test on this board, and that is now
+# settled rather than assumed. isCharging() has no case for the Core Ink and
+# falls through to charge_unknown (= 2, truthy), which is why it reads as
+# "charging" on battery. And the red charge LED is driven straight by the
+# charger IC: every GPIO was probed with pullups in both states and not one
+# bit differs between LED-on and LED-off, so that node never reaches the ESP32.
+#
+# 4150, not 4250: measured full-and-still-plugged-in at 4203mV with the LED
+# already out. At 4250 that board read "not charging" while sitting on the
+# charger. A pack resting off the charger sags below 4.15V soon after.
+BATTERY_CHARGE_MV = 4150
 # Hysteresis. A step UP needs this much more than the bare threshold, so a
 # pack resting near a boundary does not flip the symbol on alternate wakes.
 # Not theoretical: readings on this board came in at 3897/3902/3912mV against
