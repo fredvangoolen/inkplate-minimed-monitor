@@ -19,12 +19,6 @@ static const float        GLUCOSE_BIG_SIZE = 1.0f;
 static const lgfx::IFont *FONT_UNIT        = &fonts::DejaVu18;   // 20px
 static const lgfx::IFont *FONT_VALUE       = &fonts::DejaVu24;   // 26px
 static const lgfx::IFont *FONT_LABEL       = &fonts::DejaVu12;   // 16px
-// The battery warning is the one thing on this screen that is neither a
-// reading nor a label, and it has to be read from across a room by someone
-// not looking for it - so it gets the only bold face in the build. The DejaVu
-// set M5GFX ships has no bold weight at all; FreeSansBold is the nearest
-// match in shape.
-static const lgfx::IFont *FONT_WARN        = &fonts::FreeSansBold12pt7b;
 static const lgfx::IFont *FONT_ALARM_L     = &fonts::DejaVu18;   // short alarms
 static const lgfx::IFont *FONT_ALARM_S     = &fonts::DejaVu12;   // long alarms, in full
 
@@ -193,6 +187,33 @@ static void time_delta_txt(const struct tm &upd, const struct tm &now,
   else                              snprintf(out, n, "%d min ago", dmin);
 }
 
+// The device battery, as a battery symbol: an outlined body with a nub on the
+// right, filled in three steps.
+//
+// Deliberately small. It competes for attention with the one number this
+// device exists to show, and it is housekeeping - a glance should find the
+// glucose reading first and this second. Returns the width drawn, nub
+// included, so the caller can right-align it.
+static const int BATT_W = 26, BATT_H = 13, BATT_NUB_W = 3, BATT_NUB_H = 5;
+
+static int draw_battery_icon(LovyanGFX &g, int x, int y, int pct) {
+  g.drawRect(x, y, BATT_W, BATT_H, COLOR_BLACK);
+  // Nub on the right, vertically centred against the body.
+  g.fillRect(x + BATT_W, y + (BATT_H - BATT_NUB_H) / 2,
+             BATT_NUB_W, BATT_NUB_H, COLOR_BLACK);
+
+  // Inset by 2 so the fill never touches the 1px border, which would make a
+  // full cell and a half cell hard to tell apart on e-paper.
+  int inner_x = x + 2, inner_y = y + 2;
+  int inner_w = BATT_W - 4, inner_h = BATT_H - 4;
+  if (pct >= BATTERY_FULL_PCT) {
+    g.fillRect(inner_x, inner_y, inner_w, inner_h, COLOR_BLACK);
+  } else if (pct >= BATTERY_HALF_PCT) {
+    g.fillRect(inner_x, inner_y, inner_w / 2, inner_h, COLOR_BLACK);
+  }
+  return BATT_W + BATT_NUB_W;
+}
+
 // What to say instead of leaving a bare "---" to mean four different things.
 //
 // Worded for whoever is standing in front of the panel rather than for the
@@ -326,15 +347,13 @@ void draw_main_screen(LovyanGFX &g, const State &s, const Config &c) {
   // a flat battery. Sampled here at draw time rather than carried in the
   // state, so a toggle redraw shows the level now, not at the last fetch.
   int batt_pct = M5.Power.getBatteryLevel();
-  if (!has_banner && batt_pct >= 0 && batt_pct < BATTERY_WARN_PCT) {
-    const char *warn = "Battery low";
-    int ww = text_width(g, warn, FONT_WARN);
-    int wh = font_height(g, FONT_WARN);
-    int wy = sep_y + ((row_a_y - sep_y) - wh) / 2;
-    draw_text(g, warn, (PANEL_W - ww) / 2, wy, FONT_WARN, COLOR_BLACK);
+  if (!has_banner && batt_pct >= 0) {
+    int bx = PANEL_W - MARGIN - (BATT_W + BATT_NUB_W);
+    int by = sep_y + ((row_a_y - sep_y) - BATT_H) / 2;
+    draw_battery_icon(g, bx, by, batt_pct);
 #if DEBUG_LAYOUT
-    Serial.printf("charge: batt=%d%% gap %d..%d -> y=%d h=%d\n",
-                  batt_pct, sep_y, row_a_y, wy, wh);
+    Serial.printf("battery: %d%% icon at %d,%d gap %d..%d\n",
+                  batt_pct, bx, by, sep_y, row_a_y);
 #endif
   }
 

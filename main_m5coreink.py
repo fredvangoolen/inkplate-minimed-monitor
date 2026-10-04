@@ -414,14 +414,6 @@ GLUCOSE_BIG_SIZE = 2
 FONT_UNIT    = Widgets.FONTS.DejaVu18   # 20px
 FONT_VALUE   = Widgets.FONTS.DejaVu24   # 26px
 FONT_LABEL   = Widgets.FONTS.DejaVu12   # 16px
-# The battery warning. The Arduino build gives this the only bold face in the
-# project (FreeSansBold12pt7b); that is NOT available here and cannot be made
-# so from this file - the MicroPython binding table in m5unified_display.c
-# exposes no bold entry at all, though M5GFX itself compiles several. (The
-# same table is why the "DejaVu" names here are really Montserrat aliases,
-# which is the root of the metric differences documented between the builds.)
-# So this build gets size instead of weight: one step up from the label font.
-FONT_WARN    = Widgets.FONTS.DejaVu18   # 20px - no bold exists on this side
 FONT_ALARM_L = Widgets.FONTS.DejaVu18   # 20px - short alarms
 FONT_ALARM_S = Widgets.FONTS.DejaVu12   # 16px - long alarms, shown in full
 
@@ -624,10 +616,15 @@ SCREEN_COUNT = 4
 SCREEN_FORWARD = 1
 SCREEN_BACK    = -1
 
-# Below this the main screen asks for the device to be charged. Early on
-# purpose: this is a monitor someone glances at rather than watches, so the
-# warning has to survive being missed several times over.
-BATTERY_WARN_PCT = 50
+# Fill steps for the battery symbol on the main screen. Three states, not a
+# proportional bar: at a glance you want "fine / getting on / do something",
+# and this panel is read in passing rather than studied.
+#
+# Empty below 50% because that is where this board falls off a cliff -
+# measured in use, it does not last long past it.
+BATTERY_FULL_PCT = 70   # 70-100: solid
+BATTERY_HALF_PCT = 50   # 50-69:  half; below: empty
+BATT_W, BATT_H, BATT_NUB_W, BATT_NUB_H = 26, 13, 3, 5
 
 # The three-position switch, labelled G37/G39/G38 on the case: up is
 # GPIO37, down is GPIO39, press is GPIO38. Confirmed by watching every
@@ -1580,6 +1577,25 @@ def handle_pumpdataupdate(proxyaddr, proxyport, timezone):
 #
 #################################################
 
+def draw_battery_icon(x, y, pct):
+   # The device battery, as a battery symbol: an outlined body with a nub on
+   # the right, filled in three steps.
+   #
+   # Deliberately small. It competes for attention with the one number this
+   # device exists to show, and it is housekeeping - a glance should find the
+   # glucose reading first and this second.
+   gfx().drawRect(x, y, BATT_W, BATT_H, BLACK)
+   gfx().fillRect(x + BATT_W, y + (BATT_H - BATT_NUB_H) // 2,
+                  BATT_NUB_W, BATT_NUB_H, BLACK)
+   # Inset by 2 so the fill never touches the 1px border, which would make a
+   # full cell and a half cell hard to tell apart on e-paper.
+   inner_w, inner_h = BATT_W - 4, BATT_H - 4
+   if pct >= BATTERY_FULL_PCT:
+      gfx().fillRect(x + 2, y + 2, inner_w, inner_h, BLACK)
+   elif pct >= BATTERY_HALF_PCT:
+      gfx().fillRect(x + 2, y + 2, inner_w // 2, inner_h, BLACK)
+
+
 def draw_arrows(x, y, w, h, direction, count, color):
    # Real arrow shapes rather than caret characters. M5GFX gives us
    # fillTriangle, so the head is one call and the shaft another.
@@ -1733,19 +1749,14 @@ def draw_screen(state):
          dev_batt = M5.Power.getBatteryLevel()
       except Exception:
          dev_batt = -1
-      if 0 <= dev_batt < BATTERY_WARN_PCT:
-         warn = "Battery low"
-         warn_h = font_height(FONT_WARN)
-         # Guard the fit rather than assume it. The gap here is ~24px against
-         # the Arduino build's ~41px, because the glucose figure above is a
-         # different typeface at a different size, and this file cannot
-         # currently be checked on hardware - no patched UIFlow image exists.
-         # Skipping the warning is a far better failure than printing it
-         # through the insulin row.
-         if warn_h <= (row_a_y - sep_y):
-            warn_y = sep_y + ((row_a_y - sep_y) - warn_h) // 2
-            draw_text(warn, (PANEL_W - text_width(warn, FONT_WARN)) // 2,
-                      warn_y, FONT_WARN, BLACK)
+      # Guard the fit rather than assume it. The gap here is ~24px against the
+      # Arduino build's ~41px, because the glucose figure above is a different
+      # typeface at a different size, and this file still cannot be checked on
+      # hardware - no patched UIFlow image exists. Dropping the icon is a far
+      # better failure than drawing it through the insulin row.
+      if dev_batt >= 0 and BATT_H <= (row_a_y - sep_y):
+         draw_battery_icon(PANEL_W - MARGIN - (BATT_W + BATT_NUB_W),
+                           sep_y + ((row_a_y - sep_y) - BATT_H) // 2, dev_batt)
 
    insulin_txt = "%.1f U" % state["active_insulin"] if state["active_insulin"] is not None else "-- U"
    draw_kv_row(row_a_y, "Act. insulin", FONT_LABEL, insulin_txt, FONT_VALUE, BLACK)
