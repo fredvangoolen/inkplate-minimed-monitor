@@ -61,8 +61,23 @@ static const int BATTERY_CHARGE_MV  = 4250;
 // Not theoretical: the first real reading came in at 3897mV against a 3900mV
 // boundary, with the ADC repeatable to about +-15mV.
 static const int BATTERY_HYST_MV    = 40;
+// Charging is NOT reported by this board. isCharging() has no case for the
+// Core Ink and falls through to charge_unknown, which is 2 - truthy, which is
+// why it reads as "charging" on battery. So it is inferred instead.
+//
+// The voltage threshold alone is not enough either: measured on USB, a
+// charging pack sat at 3947mV, nowhere near 4250, so the bolt would only ever
+// appear at the very end of a charge. The usable signal is the TREND between
+// scheduled polls - the same pack climbed 3897 -> 3917 -> 3947 while charging,
+// against +-15mV of sampling noise. A fall of the same size clears it; in
+// between, the last decision stands, so the constant-voltage plateau at the
+// end of a charge does not drop the bolt.
+static const int BATTERY_RISE_MV    = 25;
 
 enum { BATT_EMPTY = 0, BATT_HALF = 1, BATT_FULL = 2 };
+
+// Lightning bolt drawn to the LEFT of the body while charging.
+static const int BOLT_W = 7, BOLT_H = 13, BOLT_GAP = 3;
 
 // 1 = print computed layout geometry (arrow sizing, banner wrapping) to
 // serial. There is no REPL on this board and no screenshots, so these
@@ -93,6 +108,7 @@ void draw_status_screen(LovyanGFX &g, const char *msg);
 
 int  battery_mv();   // median of several ADC reads, millivolts
 int  battery_state(int mv, int prev);   // BATT_*, with hysteresis
+bool battery_charging(int mv, int prev_mv, bool was);   // inferred, see above
 void draw_main_screen(LovyanGFX &g, const State &s, const Config &c);
 void draw_current_screen(LovyanGFX &g, int screen, const State &s,
                          const Config &c, time_t session_start);

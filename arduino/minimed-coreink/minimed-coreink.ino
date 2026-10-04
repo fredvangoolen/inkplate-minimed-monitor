@@ -533,8 +533,9 @@ static void dump_state(const State &s, const Config &c) {
   // printed a different median from the one that made the decision, which
   // made the log look self-contradictory at exactly the boundary where it
   // matters most.
-  Serial.printf("  device batt   %d mV (lib says %d%%), step %d\n",
-                last_batt_mv, (int)M5.Power.getBatteryLevel(), s.battState);
+  Serial.printf("  device batt   %d mV (lib says %d%%), step %d, charging %d\n",
+                last_batt_mv, (int)M5.Power.getBatteryLevel(), s.battState,
+                (int)s.charging);
   Serial.printf("  last good sg  %d mg/dL\n", s.lastGoodSg);
   Serial.printf("  haveData      %d\n", (int)s.haveData);
   Serial.printf("  sg            %d mg/dL   trend %s\n", s.sg, s.trend);
@@ -775,7 +776,7 @@ static void arm_toggle_wake() {
 //
 // A plain struct, where MicroPython had to serialise JSON in and out of RTC
 // memory and re-hydrate it - about 120 lines that simply do not exist here.
-#define RTC_MAGIC 0x4D4D0306u   // bump when the layout changes (State gained .battState)
+#define RTC_MAGIC 0x4D4D0307u   // bump when the layout changes (State gained charging fields)
 
 struct RtcState {
   uint32_t magic;
@@ -888,7 +889,7 @@ static int run_toggle_session(int screen, const State &s, const Config &c,
       toggle_take();
 
       uint32_t t_draw = millis();
-      refresh_battery();
+      refresh_battery(false);
       compose(screen, s, c, false, session_start);
       uint32_t draw_ms = millis() - t_draw;
 
@@ -918,11 +919,18 @@ static int run_toggle_session(int screen, const State &s, const Config &c,
 // inside the draw keeps it on the one code path that is guaranteed to be
 // after the radio is down, and gives the hysteresis a previous value to be
 // sticky against.
-static void refresh_battery(void) {
+static void refresh_battery(bool scheduled_poll) {
   int mv = battery_mv();
-  if (mv > 0) {
-    last_batt_mv = mv;
-    rtc.snap.battState = battery_state(mv, rtc.snap.battState);
+  if (mv <= 0) return;
+  last_batt_mv = mv;
+  rtc.snap.battState = battery_state(mv, rtc.snap.battState);
+  // The charging verdict needs a gap to measure across, so it is only
+  // re-decided on a scheduled poll. A toggle redraw happens seconds after
+  // the last one and would see nothing but noise, dropping the bolt
+  // mid-charge for as long as someone kept flicking the switch.
+  if (scheduled_poll) {
+    rtc.snap.charging = battery_charging(mv, rtc.snap.lastBattMv, rtc.snap.charging);
+    rtc.snap.lastBattMv = mv;
   }
 }
 
@@ -1008,7 +1016,7 @@ void setup() {
     rtc.screen = screen_step(rtc.screen, dir);
     Serial.printf("toggle wake: %s -> screen %d\n",
                   dir == SCREEN_BACK ? "back" : "fwd", rtc.screen);
-    refresh_battery();
+    refresh_battery(false);
     compose(rtc.screen, rtc.snap, cfg, false, rtc.session_start);
     rtc.screen = run_toggle_session(rtc.screen, rtc.snap, cfg, rtc.session_start);
     sleep_until(rtc.next_poll);   // does not return
@@ -1045,7 +1053,7 @@ void setup() {
     // until some later cycle succeeds. The snapshot is still there and is
     // still the best information anyone has - draw it.
     rtc.next_poll = time(nullptr) + POLL_PERIOD_S;
-    refresh_battery();
+    refresh_battery(false);
     compose(SCREEN_MAIN, rtc.snap, cfg, (rtc.cycle % FULL_REFRESH_EVERY) == 0,
             rtc.session_start);
     rtc.cycle++;
@@ -1116,8 +1124,10 @@ void setup() {
     // is the condition the reading needs. refresh_battery() runs again just
     // before compose() on every path; a second median costs ~10ms and keeps
     // the toggle redraws honest.
-    refresh_battery();
+    refresh_battery(true);
     s.battState  = rtc.snap.battState;
+    s.lastBattMv = rtc.snap.lastBattMv;
+    s.charging   = rtc.snap.charging;
 #if LAYOUT_TEST
     // Fault table spot-check against the Python's answers, and a synthetic
     // alarm so the banner and the buzzer are exercised without waiting for
@@ -1218,7 +1228,7 @@ void setup() {
 
   // Tested before the increment so cycle 0 - the first draw after a cold
   // boot, which has the splash still on the panel to clear - is a full one.
-  refresh_battery();
+  refresh_battery(false);
   compose(SCREEN_MAIN, rtc.snap, cfg, (rtc.cycle % FULL_REFRESH_EVERY) == 0,
           rtc.session_start);
   rtc.cycle++;

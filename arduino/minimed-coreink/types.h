@@ -86,6 +86,11 @@ struct State {
   // so the hysteresis has something to be sticky against, and so a toggle
   // redraw cannot disagree with the scheduled one. -1 = not sampled yet.
   int battState;
+  // Previous battery reading and the charging verdict derived from it.
+  // Charging is inferred from the trend between scheduled polls, so both
+  // have to survive the cycle; see battery_charging().
+  int  lastBattMv;
+  bool charging;
   // 24h distribution, for the stats screen
   int timeInRange, aboveHyper, belowHypo, averageSG;
 };
@@ -101,4 +106,6 @@ inline void state_init(State &s) {
   s.timeInRange = s.aboveHyper = s.belowHypo = s.averageSG = -1;
   s.link = LINK_OK;
   s.battState = -1;
+  s.lastBattMv = -1;
+  s.charging = false;
 }

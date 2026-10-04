@@ -640,6 +640,17 @@ BATTERY_CHARGE_MV = 4250
 # Not theoretical: readings on this board came in at 3897/3902/3912mV against
 # a 3900mV boundary - about the +-15mV the ADC repeats to.
 BATTERY_HYST_MV   = 40
+# Charging is NOT reported by this board. isCharging() has no case for the
+# Core Ink and falls through to charge_unknown, which is 2 - truthy, which is
+# why it reads as "charging" on battery. So it is inferred from the trend.
+#
+# The voltage threshold alone is not enough either: measured on USB, a
+# charging pack sat at 3947mV, nowhere near 4250, so the bolt would only ever
+# appear at the very end of a charge. The same pack climbed 3897 -> 3917 ->
+# 3947 while charging, against +-15mV of sampling noise.
+BATTERY_RISE_MV   = 25
+# Lightning bolt drawn to the LEFT of the body while charging.
+BOLT_W, BOLT_H, BOLT_GAP = 7, 13, 3
 BATT_EMPTY, BATT_HALF, BATT_FULL = 0, 1, 2
 BATT_W, BATT_H, BATT_NUB_W, BATT_NUB_H = 26, 13, 3, 5
 
@@ -711,6 +722,8 @@ def make_snapshot(state, ip):
       "link": state["link"],
       "lastsg": state.get("last_good_sg"),
       "battstep": state.get("batt_step"),
+      "battmv": state.get("last_batt_mv"),
+      "charging": state.get("charging"),
       "dst": dstDelta,
       "stats": state["stats"],
       "ip": ip,
@@ -739,6 +752,8 @@ def state_from_snapshot(snap):
    st["link"] = snap.get("link", LINK_OK)
    st["last_good_sg"] = snap.get("lastsg")
    st["batt_step"] = snap.get("battstep")
+   st["last_batt_mv"] = snap.get("battmv")
+   st["charging"] = snap.get("charging", False)
    st["stats"] = snap.get("stats") or {}
    st["battery_pct"] = snap.get("batt")
    st["reservoir_units"] = snap.get("resu")
@@ -1412,6 +1427,10 @@ def new_state():
       # Which battery step is showing. Carried rather than recomputed per
       # draw so the hysteresis has something to be sticky against.
       "batt_step": None,
+      # Previous reading and the charging verdict derived from it; the
+      # trend is measured between scheduled polls, so both must survive.
+      "last_batt_mv": None,
+      "charging": False,
       "trend": "NONE",
       "active_insulin": None,
       "last_update_tm": None,
@@ -1633,6 +1652,29 @@ def battery_state(mv, prev):
    return BATT_EMPTY
 
 
+def battery_charging(mv, prev_mv, was):
+   # Charging, inferred from the trend. See BATTERY_RISE_MV for why the
+   # obvious signals are unusable here. "was" is carried so a plateau holds
+   # the previous verdict rather than flickering.
+   if mv >= BATTERY_CHARGE_MV:
+      return True
+   if prev_mv is None or prev_mv <= 0:
+      return False          # no history yet: do not guess
+   delta = mv - prev_mv
+   if delta >= BATTERY_RISE_MV:
+      return True
+   if delta <= -BATTERY_RISE_MV:
+      return False
+   return was
+
+
+def draw_bolt(x, y):
+   # Two wedges. Small and solid rather than outlined: at 13px on e-paper an
+   # outline closes up into a blob.
+   gfx().fillTriangle(x + 6, y,     x,     y + 8, x + 4, y + 8,  BLACK)
+   gfx().fillTriangle(x + 3, y + 5, x + 7, y + 5, x + 1, y + 13, BLACK)
+
+
 def draw_battery_icon(x, y, state):
    # The device battery, as a battery symbol: an outlined body with a nub on
    # the right, filled in three steps.
@@ -1810,8 +1852,13 @@ def draw_screen(state):
       # hardware - no patched UIFlow image exists. Dropping the icon is a far
       # better failure than drawing it through the insulin row.
       if batt_step is not None and BATT_H <= (row_a_y - sep_y):
-         draw_battery_icon(PANEL_W - MARGIN - (BATT_W + BATT_NUB_W),
-                           sep_y + ((row_a_y - sep_y) - BATT_H) // 2, batt_step)
+         bx = PANEL_W - MARGIN - (BATT_W + BATT_NUB_W)
+         by = sep_y + ((row_a_y - sep_y) - BATT_H) // 2
+         draw_battery_icon(bx, by, batt_step)
+         # Bolt to the LEFT of the body, so the battery stays pinned to the
+         # right margin whether or not it is charging.
+         if state.get("charging"):
+            draw_bolt(bx - BOLT_GAP - BOLT_W, by)
 
    insulin_txt = "%.1f U" % state["active_insulin"] if state["active_insulin"] is not None else "-- U"
    draw_kv_row(row_a_y, "Act. insulin", FONT_LABEL, insulin_txt, FONT_VALUE, BLACK)
@@ -2104,7 +2151,8 @@ def draw_info_screen(state, cfg, ip):
 FULL_REFRESH_EVERY = 12
 
 
-def draw_current_screen(screen, state, cfg, ip, full_refresh=False):
+def draw_current_screen(screen, state, cfg, ip, full_refresh=False,
+                        scheduled_poll=False):
    # Sample the battery and decide its step here: this is the one choke point
    # every draw passes through, and on every path the radio is already down by
    # the time it is reached - which is the condition the reading needs, since
@@ -2113,6 +2161,14 @@ def draw_current_screen(screen, state, cfg, ip, full_refresh=False):
    mv = battery_mv()
    if mv > 0:
       state["batt_step"] = battery_state(mv, state.get("batt_step"))
+      # The charging verdict needs a gap to measure across, so it is only
+      # re-decided on a scheduled poll. A toggle redraw happens seconds after
+      # the last one and would see nothing but noise, dropping the bolt
+      # mid-charge for as long as someone kept flicking the switch.
+      if scheduled_poll:
+         state["charging"] = battery_charging(mv, state.get("last_batt_mv"),
+                                              state.get("charging"))
+         state["last_batt_mv"] = mv
 
    if screen == SCREEN_STATS:
       compose(lambda: draw_stats_screen(state), full_refresh)
@@ -2720,13 +2776,16 @@ def main():
             # which has the version splash still on the panel to clear - is a
             # full one.
             draw_current_screen(screen, state, cfg, ip,
-                                full_refresh=(cycle % FULL_REFRESH_EVERY == 0))
+                                full_refresh=(cycle % FULL_REFRESH_EVERY == 0),
+                                scheduled_poll=True)
             # draw_current_screen() is what decides the battery step, and the
             # snapshot above was built before it ran - so carry the result
             # back, or the step saved for the next wake is always one cycle
             # stale and the hysteresis chains off the wrong value.
             if snap is not None:
                snap["battstep"] = state.get("batt_step")
+               snap["battmv"] = state.get("last_batt_mv")
+               snap["charging"] = state.get("charging")
             cycle += 1
 
             # No toggle session here on purpose - the device sleeps straight

@@ -230,6 +230,25 @@ int battery_state(int mv, int prev) {
   return BATT_EMPTY;
 }
 
+// Charging, inferred from the trend. See the note on BATTERY_RISE_MV for why
+// the obvious signals are unusable on this board. "was" is carried so a
+// plateau holds the previous verdict rather than flickering.
+bool battery_charging(int mv, int prev_mv, bool was) {
+  if (mv >= BATTERY_CHARGE_MV) return true;
+  if (prev_mv <= 0) return false;            // no history yet: do not guess
+  int delta = mv - prev_mv;
+  if (delta >= BATTERY_RISE_MV) return true;
+  if (delta <= -BATTERY_RISE_MV) return false;
+  return was;
+}
+
+// A lightning bolt, drawn as two wedges. Small and solid rather than
+// outlined: at 13px on e-paper an outline closes up into a blob.
+static void draw_bolt(LovyanGFX &g, int x, int y) {
+  g.fillTriangle(x + 6, y,      x,     y + 8,  x + 4, y + 8,  COLOR_BLACK);
+  g.fillTriangle(x + 3, y + 5,  x + 7, y + 5,  x + 1, y + 13, COLOR_BLACK);
+}
+
 static int draw_battery_icon(LovyanGFX &g, int x, int y, int state) {
   g.drawRect(x, y, BATT_W, BATT_H, COLOR_BLACK);
   // Nub on the right, vertically centred against the body.
@@ -386,6 +405,10 @@ void draw_main_screen(LovyanGFX &g, const State &s, const Config &c) {
     int bx = PANEL_W - MARGIN - (BATT_W + BATT_NUB_W);
     int by = sep_y + ((row_a_y - sep_y) - BATT_H) / 2;
     draw_battery_icon(g, bx, by, s.battState);
+    // Bolt to the LEFT of the body, so the battery stays pinned to the right
+    // margin whether or not it is charging - the eye finds it in the same
+    // place either way.
+    if (s.charging) draw_bolt(g, bx - BOLT_GAP - BOLT_W, by);
   }
 
   char insulin_txt[16];
