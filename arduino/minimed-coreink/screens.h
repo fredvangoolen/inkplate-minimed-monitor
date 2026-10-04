@@ -53,42 +53,13 @@ static const int HYPO_THRESHOLD_MGDL  = 70;
 // notes in main_m5coreink.py's draw_info_screen().
 static const int BATTERY_FULL_MV    = 3900;   // >= this: solid
 static const int BATTERY_HALF_MV    = 3700;   // >= this: half; below: empty
-// Voltage is the ONLY usable charger test on this board, and that is now
-// settled rather than assumed. isCharging() has no case for the Core Ink and
-// falls through to charge_unknown (= 2, truthy), which is why it reads as
-// "charging" on battery. And the red charge LED is driven straight by the
-// charger IC: every GPIO was probed with pullups in both states and not one
-// bit differs between LED-on and LED-off, so that node never reaches the
-// ESP32. Only GPIO14 is untested, every other pin being accounted for.
-//
-// 4150, not 4250: measured full-and-still-plugged-in at 4203mV with the LED
-// already out. At 4250 that board read "not charging" while sitting on the
-// charger. A pack resting off the charger sags below 4.15V soon after, so
-// this still separates "on the cable" from "full and unplugged" - which is
-// the question actually being asked.
-static const int BATTERY_CHARGE_MV  = 4150;
 // Hysteresis. A step UP needs this much more than the bare threshold, so a
 // pack resting near a boundary does not flip the symbol on alternate wakes.
 // Not theoretical: the first real reading came in at 3897mV against a 3900mV
 // boundary, with the ADC repeatable to about +-15mV.
 static const int BATTERY_HYST_MV    = 40;
-// Charging is NOT reported by this board. isCharging() has no case for the
-// Core Ink and falls through to charge_unknown, which is 2 - truthy, which is
-// why it reads as "charging" on battery. So it is inferred instead.
-//
-// The voltage threshold alone is not enough either: measured on USB, a
-// charging pack sat at 3947mV, nowhere near 4250, so the bolt would only ever
-// appear at the very end of a charge. The usable signal is the TREND between
-// scheduled polls - the same pack climbed 3897 -> 3917 -> 3947 while charging,
-// against +-15mV of sampling noise. A fall of the same size clears it; in
-// between, the last decision stands, so the constant-voltage plateau at the
-// end of a charge does not drop the bolt.
-static const int BATTERY_RISE_MV    = 25;
 
 enum { BATT_EMPTY = 0, BATT_HALF = 1, BATT_FULL = 2 };
-
-// Lightning bolt drawn to the LEFT of the body while charging.
-static const int BOLT_W = 7, BOLT_H = 13, BOLT_GAP = 3;
 
 // 1 = print computed layout geometry (arrow sizing, banner wrapping) to
 // serial. There is no REPL on this board and no screenshots, so these
@@ -119,7 +90,6 @@ void draw_status_screen(LovyanGFX &g, const char *msg);
 
 int  battery_mv();   // median of several ADC reads, millivolts
 int  battery_state(int mv, int prev);   // BATT_*, with hysteresis
-bool battery_charging(int mv, int prev_mv, bool was);   // inferred, see above
 void draw_main_screen(LovyanGFX &g, const State &s, const Config &c);
 void draw_current_screen(LovyanGFX &g, int screen, const State &s,
                          const Config &c, time_t session_start);
