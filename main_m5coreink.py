@@ -938,7 +938,7 @@ def web_page_config(ntpserver,timezone,proxyport):
             <tr style="vertical-align: top; background-color: rgb(230, 230, 255);"> \n \
             <td style="width: 300px;">NTP server address<br><input type="text" id="fntpserver" name="fntpserver" value=%s></td> \n \
             <tr style="vertical-align: top; background-color: rgb(230, 230, 255);"> \n \
-            <td style="width: 300px;">Time Zone (h)<br><input type="text" id="ftimezone" name="ftimezone" value=%s></td> \n \
+            <td style="width: 300px;">Time Zone (h) (1 = GMT+1 = Brussels; summer time is automatic)<br><input type="text" id="ftimezone" name="ftimezone" value=%s></td> \n \
             </tbody></table><br> \n \
             <table style="text-align: left; width: 400px; background-color: white; font-family: Helvetica,Arial,sans-serif; font-weight: bold; font-size: 14px;" border="0" cellpadding="2" cellspacing="3"><tbody> \n \
             <tr style="font-size: 18px; background-color: lightgrey"> \n \

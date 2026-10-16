@@ -49,7 +49,7 @@ static String config_page(const Config &c) {
     "<tr style=\"font-size:18px;background-color:lightgrey\"><td>Time and date</td>"
     "<tr style=\"background-color:rgb(230,230,255)\"><td>NTP server address<br>"
     "<input type='text' name='fntpserver' value='" + c.ntpserver + "'></td>"
-    "<tr style=\"background-color:rgb(230,230,255)\"><td>Time Zone (h)<br>"
+    "<tr style=\"background-color:rgb(230,230,255)\"><td>Time Zone (h) (1 = GMT+1 = Brussels; summer time is automatic)<br>"
     "<input type='text' name='ftimezone' value='" + String(c.timezone) + "'></td>"
     "</tbody></table><br>"
     "<table style=\"text-align:left;width:400px;background-color:white;"

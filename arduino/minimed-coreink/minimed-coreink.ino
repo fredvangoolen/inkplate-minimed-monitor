@@ -119,7 +119,7 @@ static bool config_read(Config &c) {
   c.ntpserver = p.getString("ntpserver", "pool.ntp.org");
   c.patient   = p.getString("patient", "");
   c.proxyport = p.getUShort("proxyport", 8081);
-  c.timezone  = p.getInt("timezone", 0);
+  c.timezone  = p.getInt("timezone", DEFAULT_TIMEZONE);
   p.end();
   // Patient name is deliberately NOT required: the proxy reports firstName,
   // so a device never told a name still shows the right one.
