@@ -23,11 +23,17 @@ struct WifiNet {
   bool usable() const { return ssid.length() && pass.length(); }
 };
 
+// Hours from UTC, standard time; summer time is added from the proxy's
+// clientTimeZoneName. 1 (Brussels), not 0: the portal form shows this value,
+// and an untouched 0 put every clock an hour out - the same default the
+// MicroPython builds have always had.
+static const int DEFAULT_TIMEZONE = 1;
+
 struct Config {
   WifiNet wifi[WIFI_SLOTS];
   String proxyaddr, ntpserver, patient;
   uint16_t proxyport = 8081;
-  int timezone = 0;
+  int timezone = DEFAULT_TIMEZONE;
 };
 
 // Why there is no current reading.
