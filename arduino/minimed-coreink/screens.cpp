@@ -661,3 +661,40 @@ void draw_status_screen(LovyanGFX &g, const char *msg) {
     }
   }
 }
+
+void draw_wipe_dialog(LovyanGFX &g, bool yes_selected) {
+  g.fillScreen(COLOR_WHITE);
+  int y = draw_screen_header(g, "WIPE CONFIGURATION");
+
+  int lh = font_height(g, FONT_LABEL);
+  String lines[4];
+  int n = wrap_text(g, "Erase all settings and restart in setup mode?",
+                    PANEL_W - 2 * MARGIN, FONT_LABEL, lines, 4);
+  for (int i = 0; i < n; i++) {
+    draw_text(g, lines[i].c_str(), MARGIN, y, FONT_LABEL, COLOR_BLACK);
+    y += lh + 2;
+  }
+  y += 6;
+
+  // The selection is shown by inversion, the only emphasis a monochrome
+  // panel has that cannot be mistaken for a border style.
+  const char *opts[2] = {"No", "Yes"};
+  int vh = font_height(g, FONT_VALUE);
+  int box_h = vh + 8;
+  int box_w = 100;
+  int box_x = (PANEL_W - box_w) / 2;
+  for (int i = 0; i < 2; i++) {
+    bool sel = (i == 1) == yes_selected;
+    uint32_t fg = sel ? COLOR_WHITE : COLOR_BLACK;
+    uint32_t bg = sel ? COLOR_BLACK : COLOR_WHITE;
+    if (sel) g.fillRect(box_x, y, box_w, box_h, COLOR_BLACK);
+    else     g.drawRect(box_x, y, box_w, box_h, COLOR_BLACK);
+    int tw = text_width(g, opts[i], FONT_VALUE);
+    draw_text(g, opts[i], box_x + (box_w - tw) / 2, y + 4, FONT_VALUE, fg, bg);
+    y += box_h + 6;
+  }
+
+  const char *hint = "Flick to choose, press";
+  int hw = text_width(g, hint, FONT_LABEL);
+  draw_text(g, hint, (PANEL_W - hw) / 2, PANEL_H - MARGIN - lh, FONT_LABEL, COLOR_BLACK);
+}

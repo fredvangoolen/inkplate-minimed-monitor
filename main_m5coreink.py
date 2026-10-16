@@ -654,6 +654,16 @@ BATT_W, BATT_H, BATT_NUB_W, BATT_NUB_H = 26, 13, 3, 5
 # the other gets both directions - see arm_toggle_wake().
 BTN_UP_PIN   = 37
 BTN_DOWN_PIN = 39
+# Pressing the switch in. Used only for the configuration wipe on the info
+# screen, and deliberately NOT a wake source: ext1's ALL_LOW cannot share
+# with the down pin, and the wipe is reached from an open session anyway.
+BTN_PRESS_PIN = 38
+
+# How long the switch must be held in on the info screen to offer the wipe -
+# long enough that nobody gets there by fidgeting - and how long the dialog
+# then waits for an answer before taking silence as No.
+WIPE_HOLD_MS   = 5000
+WIPE_DIALOG_MS = 15000
 
 RTC_STATE_VERSION = 2
 
@@ -772,7 +782,8 @@ def config_read():
       return {}
 
 
-# To clear a stuck config and force AP-mode setup again:
+# To clear a stuck config and force AP-mode setup again, hold the toggle
+# pressed in for 5s on the info screen (see run_wipe_dialog()), or over USB:
 #   mpremote connect /dev/ttyACM0 exec "import os; os.remove('/flash/minimed_config.json')"
 
 
@@ -2280,6 +2291,116 @@ TOGGLE_RELEASE_MAX_MS = 3000    # give up waiting for the switch to spring back
 TOGGLE_DEBOUNCE_MS    = 120     # contact settle after each accepted press
 
 
+def press_down():
+   try:
+      return machine.Pin(BTN_PRESS_PIN, machine.Pin.IN).value() == 0
+   except Exception:
+      return False
+
+
+def wait_press_release(max_ms=TOGGLE_RELEASE_MAX_MS):
+   # Bounded, like every other wait on this switch. False if it never let go.
+   release_by = time.ticks_add(time.ticks_ms(), max_ms)
+   while press_down() and time.ticks_diff(release_by, time.ticks_ms()) > 0:
+      time.sleep_ms(10)
+   return not press_down()
+
+
+def draw_wipe_dialog(yes_selected):
+   # Two options stacked vertically so the up/down flick maps onto them
+   # directly: No on top, Yes below. Selection shown by inversion.
+   gfx().fillScreen(WHITE)
+   y = draw_screen_header("WIPE CONFIGURATION")
+   lh = font_height(FONT_LABEL)
+   for line in wrap_text_to_width("Erase all settings and restart in setup mode?",
+                                  PANEL_W - 2*MARGIN, FONT_LABEL):
+      draw_text(line, MARGIN, y, FONT_LABEL, BLACK)
+      y += lh + 2
+   y += 6
+   box_h = font_height(FONT_VALUE) + 8
+   box_w = 100
+   box_x = (PANEL_W - box_w) // 2
+   for i, label in enumerate(("No", "Yes")):
+      sel = (i == 1) == yes_selected
+      fg, bg = (WHITE, BLACK) if sel else (BLACK, WHITE)
+      if sel:
+         gfx().fillRect(box_x, y, box_w, box_h, BLACK)
+      else:
+         gfx().drawRect(box_x, y, box_w, box_h, BLACK)
+      tw = text_width(label, FONT_VALUE)
+      draw_text(label, box_x + (box_w - tw)//2, y + 4, FONT_VALUE, fg, bg)
+      y += box_h + 6
+   hint = "Flick to choose, press"
+   draw_text(hint, (PANEL_W - text_width(hint, FONT_LABEL))//2,
+             PANEL_H - MARGIN - lh, FONT_LABEL, BLACK)
+
+
+def wipe_and_restart():
+   # The only way to correct a configuration short of a USB cable: once a
+   # board is configured the AP setup never comes back by itself.
+   import os
+   try:
+      os.remove(CONFIG_FILE)
+      msg = "Configuration wiped\nRestarting in setup mode ..."
+      print("wipe: configuration erased")
+   except OSError as e:
+      msg = "Wipe FAILED\nRestarting ..."
+      print("wipe: ERASE FAILED (%s)" % e)
+   # Drop the snapshot too, or the next configuration - possibly another
+   # patient's, in another house - would start out showing this one's last
+   # reading.
+   try:
+      machine.RTC().memory(b"")
+   except Exception:
+      pass
+   do_ap_status(msg)
+   time.sleep_ms(2000)
+   machine.reset()
+
+
+def run_wipe_dialog():
+   # Default No; up selects No, down selects Yes, a press confirms. Silence
+   # is No. Returns only when the answer was No.
+   print("wipe: dialog open")
+   yes = False
+   # Drawn BEFORE waiting for the release: the dialog appearing is the only
+   # sign the hold was long enough, so people keep holding until they see it.
+   # Waiting for the release first - with the switch's usual 3s bound - meant
+   # a natural hold timed out and cancelled with nothing ever shown.
+   compose(lambda: draw_wipe_dialog(yes), full_refresh=True)
+   # The hold that opened the dialog must not also answer it.
+   if not wait_press_release(WIPE_DIALOG_MS):
+      print("wipe: press never released - cancelled")
+      return
+   time.sleep_ms(TOGGLE_DEBOUNCE_MS)
+   toggle_take()
+   deadline = time.ticks_add(time.ticks_ms(), WIPE_DIALOG_MS)
+   while time.ticks_diff(deadline, time.ticks_ms()) > 0:
+      if press_down():
+         time.sleep_ms(TOGGLE_DEBOUNCE_MS)
+         if press_down():
+            print("wipe: answered %s" % ("Yes" if yes else "No"))
+            if yes:
+               wipe_and_restart()
+            wait_press_release()
+            return
+      latched = toggle_take()
+      direction = _toggle_dir[0] if latched else toggle_dir_now()
+      if latched or direction != 0:
+         want = direction == SCREEN_FORWARD
+         release_by = time.ticks_add(time.ticks_ms(), TOGGLE_RELEASE_MAX_MS)
+         while toggle_pressed() and time.ticks_diff(release_by, time.ticks_ms()) > 0:
+            time.sleep_ms(10)
+         time.sleep_ms(TOGGLE_DEBOUNCE_MS)
+         toggle_take()
+         if want != yes:
+            yes = want
+            compose(lambda: draw_wipe_dialog(yes), full_refresh=False)
+         deadline = time.ticks_add(time.ticks_ms(), WIPE_DIALOG_MS)
+      time.sleep_ms(10)
+   print("wipe: no answer - cancelled")
+
+
 def run_toggle_session(screen, state, cfg, ip):
    # Returns the screen index left on display. Each press advances one
    # screen and restarts the window, so holding a conversation with the
@@ -2293,8 +2414,55 @@ def run_toggle_session(screen, state, cfg, ip):
    # device would never sleep again - the same never-polls-again lockup the
    # tail of main() guards against, just reached a different way.
    hard_stop = time.ticks_add(time.ticks_ms(), TOGGLE_SESSION_MAX_MS)
+   press_since = None
+   # The hold has to START on the info screen. Counting any time the press
+   # reads low there let a hold begun on another screen - carried across by
+   # flicking with the switch still pushed in - open the dialog on arrival.
+   # So the press only counts once it has been seen released on this screen.
+   press_armed = False
    while (time.ticks_diff(deadline, time.ticks_ms()) > 0 and
           time.ticks_diff(hard_stop, time.ticks_ms()) > 0):
+      # Holding the switch in on the info screen offers the wipe. Only there:
+      # it is the screen that shows the configuration being thrown away.
+      down = press_down()
+      if screen != SCREEN_INFO:
+         press_armed = False
+      elif not down:
+         press_armed = True
+      if screen == SCREEN_INFO and down and press_armed:
+         # One unbroken press, nothing else. The switch can be rocked up or
+         # down while still pushed in, so any flick during the hold restarts
+         # it - and, by disarming, demands a release before a new hold
+         # counts. The flick itself is left latched for the code below.
+         if _toggle_latch[0] or toggle_pressed():
+            if press_since is not None:
+               print("wipe: hold reset by flick after %d ms"
+                     % time.ticks_diff(time.ticks_ms(), press_since))
+            press_since = None
+            press_armed = False
+            continue
+         if press_since is None:
+            press_since = time.ticks_ms()
+            print("wipe: hold started")
+         deadline = time.ticks_add(time.ticks_ms(), TOGGLE_AWAKE_MS)
+         if time.ticks_diff(time.ticks_ms(), press_since) >= WIPE_HOLD_MS:
+            run_wipe_dialog()   # returns only on No
+            press_since = None
+            press_armed = False   # re-arms once the switch is seen released
+            toggle_take()
+            draw_current_screen(screen, state, cfg, ip, full_refresh=True)
+            deadline = time.ticks_add(time.ticks_ms(), TOGGLE_AWAKE_MS)
+         time.sleep_ms(10)
+         continue
+      if press_since is not None:
+         # Released early. Whatever the up/down contacts did while the switch
+         # was pushed in is not a flick; discard it.
+         print("wipe: hold released after %d ms"
+               % time.ticks_diff(time.ticks_ms(), press_since))
+         press_since = None
+         time.sleep_ms(TOGGLE_DEBOUNCE_MS)
+         toggle_take()
+         continue
       latched = toggle_take()
       # Read the level FIRST when there is no latch: by the time the pin is
       # sampled after a redraw the switch may already be back at rest, and the
