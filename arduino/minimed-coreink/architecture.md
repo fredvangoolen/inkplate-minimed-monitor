@@ -60,7 +60,7 @@ Sectioned by banner comments, in the order the cycle uses them:
 | buzzer | `beep()`, including waiting out its own note |
 | polling | `fetch_pump_data()` — the ArduinoJson parse |
 | display | `compose()`, plus diagnostics behind `DEBUG_ASCII` |
-| toggle | the IRQ latch, `arm_toggle_wake()`, `run_toggle_session()` |
+| toggle | the IRQ latch, `arm_toggle_wake()`, `run_toggle_session()`, the press-and-hold configuration wipe (`run_wipe_dialog()`) |
 | rtc state | the `RtcState` struct in `RTC_DATA_ATTR` |
 | main | `sleep_until()` and `setup()` |
 

@@ -118,6 +118,18 @@ One improvement over that build: `WebServer::arg()` URL-decodes, where the
 Python splits the raw query string, so a WiFi password containing `%`, `&` or
 a space works here and silently does not there.
 
+Once configured, the portal never comes back by itself — a total WiFi or
+proxy failure is not a reason to drop into setup. To start over, for a typo
+in the proxy name or a board moving house, **wipe it from the device**: flick
+to the *Device & Network* screen, hold the toggle pressed in for 5 seconds,
+flick down to **Yes** and press. That clears the `minimed` NVS namespace
+and the RTC snapshot (so the next setup does not open on the last patient's
+reading) and restarts into the portal. The dialog opens on **No**, and 15
+seconds without an answer also counts as No. Pressing is not a wake source —
+ext1 on this chip can only wake when *all* its pins are low, so it cannot
+share with the down pin — which is why the board must already be awake on
+that screen, i.e. flicked there.
+
 To seed settings over the cable instead, they live in NVS under the namespace
 `minimed`, read via `Preferences`.
 Credentials are deliberately **not** in this repo. Until the AP portal

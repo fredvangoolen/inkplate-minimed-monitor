@@ -88,6 +88,11 @@ static const int SCREEN_BACK    = -1;
 // M5GFX clips silently.
 void draw_status_screen(LovyanGFX &g, const char *msg);
 
+// Confirmation for wiping the stored configuration, reached by holding the
+// toggle pressed on the info screen. Two options stacked vertically so the
+// up/down flick maps onto them directly: No on top, Yes below.
+void draw_wipe_dialog(LovyanGFX &g, bool yes_selected);
+
 int  battery_mv();   // median of several ADC reads, millivolts
 int  battery_state(int mv, int prev);   // BATT_*, with hysteresis
 void draw_main_screen(LovyanGFX &g, const State &s, const Config &c);

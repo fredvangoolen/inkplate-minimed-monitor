@@ -662,13 +662,24 @@ static void compose(int screen, const State &s, const Config &c,
 
 // ---------------------------------------------------------------- toggle
 //
-// Three-position switch: G37 up, G39 down, G38 press (unused). Both
+// Three-position switch: G37 up, G39 down, G38 press. Both
 // directions advance a screen, which needs BOTH of the ESP32's GPIO wake
 // sources - ext0 takes a single pin, ext1 a mask, and one alone cannot cover
 // two pins that must each wake on a low level.
 
 static const gpio_num_t BTN_UP_PIN   = GPIO_NUM_37;
 static const gpio_num_t BTN_DOWN_PIN = GPIO_NUM_39;
+// Pressing the switch in. Used for one thing only - the configuration wipe
+// on the info screen - and deliberately NOT armed as a wake source: ext1 on
+// this chip can only wake on ALL of its pins low, so it cannot share with
+// the down pin, and the wipe is reached from an open session anyway.
+static const gpio_num_t BTN_PRESS_PIN = GPIO_NUM_38;
+
+// How long the switch must be held in on the info screen to offer the wipe.
+// Long enough that nobody gets there by fidgeting with the switch.
+static const uint32_t WIPE_HOLD_MS = 5000;
+// How long the dialog waits for an answer before taking it as No.
+static const uint32_t WIPE_DIALOG_MS = 15000;
 
 // How long to stay awake after a press, watching for another. Waking costs
 // ~1.2s of boot before any of this runs, so a run of flicks should redraw at
@@ -714,6 +725,7 @@ static void IRAM_ATTR toggle_isr_down() {
 static void install_toggle_irq() {
   pinMode(BTN_UP_PIN, INPUT);
   pinMode(BTN_DOWN_PIN, INPUT);
+  pinMode(BTN_PRESS_PIN, INPUT);
   attachInterrupt(digitalPinToInterrupt(BTN_UP_PIN), toggle_isr_up, FALLING);
   attachInterrupt(digitalPinToInterrupt(BTN_DOWN_PIN), toggle_isr_down, FALLING);
 }
@@ -848,6 +860,100 @@ static void sleep_until(time_t next_poll) {
   esp_deep_sleep((uint64_t)remaining * 1000000ULL);
 }
 
+static bool press_down() { return digitalRead(BTN_PRESS_PIN) == LOW; }
+
+// Waits, bounded, for the press pin to come back up. False if it never did.
+static bool wait_press_release(uint32_t max_ms = TOGGLE_RELEASE_MAX_MS) {
+  uint32_t release_by = millis() + max_ms;
+  while (press_down() && (int32_t)(release_by - millis()) > 0) delay(10);
+  return !press_down();
+}
+
+// Composed off-screen and pushed once, for the reason given at compose().
+static void show_wipe(bool yes, const char *msg, bool full_refresh) {
+  M5.Display.setEpdMode(full_refresh ? epd_mode_t::epd_quality
+                                     : epd_mode_t::epd_fast);
+  M5Canvas canvas(&M5.Display);
+  canvas.setColorDepth(CANVAS_BPP);
+  bool sprite = canvas.createSprite(PANEL_W, PANEL_H);
+  LovyanGFX &g = sprite ? (LovyanGFX &)canvas : (LovyanGFX &)M5.Display;
+  if (msg) draw_status_screen(g, msg);
+  else     draw_wipe_dialog(g, yes);
+  if (sprite) {
+    canvas.pushSprite(0, 0);
+    canvas.deleteSprite();
+  }
+}
+
+// Erase the stored configuration and restart, which lands in the setup
+// portal because config_read() then finds nothing. This is the only way to
+// correct a configuration short of a USB cable: once a board is configured
+// the portal never comes back on its own, so a mistyped proxy name would
+// otherwise strand it.
+static void wipe_and_restart() {
+  Preferences p;
+  p.begin("minimed", false);
+  bool ok = p.clear();
+  p.end();
+  Serial.printf("wipe: configuration %s\n", ok ? "erased" : "ERASE FAILED");
+  // The RTC snapshot survives a software restart. Drop it too, or the next
+  // configuration - possibly another patient's, in another house - would
+  // start out showing this one's last reading.
+  rtc.magic = 0;
+  show_wipe(false, ok ? "Configuration wiped\nRestarting in setup mode ..."
+                       : "Wipe FAILED\nRestarting ...", true);
+  delay(2000);
+  esp_restart();
+}
+
+// The confirmation dialog. Default No; up selects No, down selects Yes, and
+// a press confirms whichever is selected. Silence is No. Returns only when
+// the answer was No - Yes does not return.
+static void run_wipe_dialog() {
+  Serial.println("wipe: dialog open");
+  bool yes = false;
+  // Drawn BEFORE waiting for the release: the dialog appearing is the only
+  // sign the hold was long enough, so people keep holding until they see it.
+  // Waiting for the release first - with the switch's usual 3s bound - meant
+  // a natural hold timed out and cancelled with nothing ever shown.
+  show_wipe(yes, nullptr, true);
+  // The hold that opened the dialog must not also answer it.
+  if (!wait_press_release(WIPE_DIALOG_MS)) {
+    Serial.println("wipe: press never released - cancelled");
+    return;
+  }
+  delay(TOGGLE_DEBOUNCE_MS);
+  toggle_take();
+  uint32_t deadline = millis() + WIPE_DIALOG_MS;
+  while ((int32_t)(deadline - millis()) > 0) {
+    if (press_down()) {
+      delay(TOGGLE_DEBOUNCE_MS);
+      if (press_down()) {
+        Serial.printf("wipe: answered %s\n", yes ? "Yes" : "No");
+        if (yes) wipe_and_restart();
+        wait_press_release();
+        return;
+      }
+    }
+    bool latched = toggle_take();
+    int dir = latched ? toggle_latched_dir : toggle_dir_now();
+    if (latched || dir != 0) {
+      bool want = (dir == SCREEN_FORWARD);
+      uint32_t release_by = millis() + TOGGLE_RELEASE_MAX_MS;
+      while (toggle_pressed() && (int32_t)(release_by - millis()) > 0) delay(10);
+      delay(TOGGLE_DEBOUNCE_MS);
+      toggle_take();
+      if (want != yes) {
+        yes = want;
+        show_wipe(yes, nullptr, false);
+      }
+      deadline = millis() + WIPE_DIALOG_MS;
+    }
+    delay(10);
+  }
+  Serial.println("wipe: no answer - cancelled");
+}
+
 // Returns the screen left on display. Each press advances one screen and
 // restarts the window, so a conversation with the device never drops back to
 // sleep mid-flick.
@@ -857,9 +963,65 @@ static int run_toggle_session(int screen, const State &s, const Config &c,
   toggle_take();   // discard the press that woke us; already accounted for
   uint32_t deadline  = millis() + TOGGLE_AWAKE_MS;
   uint32_t hard_stop = millis() + TOGGLE_SESSION_MAX_MS;
+  // A separate flag rather than press_since == 0 as "not held": the old
+  // `millis() | 1` sentinel put the start 1 ms in the FUTURE on an even
+  // millisecond, the unsigned elapsed time then wrapped to ~4e9, and the
+  // dialog opened on a brief push.
+  bool     holding = false;
+  uint32_t press_since = 0;
+  // The hold has to START on the info screen. Counting any time the press
+  // reads low there let a hold begun on another screen - carried across by
+  // flicking with the switch still pushed in - open the dialog on arrival.
+  // So the press only counts once it has been seen released on this screen.
+  bool press_armed = false;
 
   while ((int32_t)(deadline - millis()) > 0 &&
          (int32_t)(hard_stop - millis()) > 0) {
+    // Holding the switch in on the info screen offers the wipe. Only there:
+    // it is the screen that shows the configuration being thrown away.
+    bool down = press_down();
+    if (screen != SCREEN_INFO) press_armed = false;
+    else if (!down)            press_armed = true;
+    if (screen == SCREEN_INFO && down && press_armed) {
+      // One unbroken press, nothing else. The switch can be rocked up or
+      // down while still pushed in, so any flick during the hold restarts
+      // it - and, by disarming, demands a release before a new hold counts.
+      // The flick itself is left latched for the code below to act on.
+      if (toggle_latch || toggle_pressed()) {
+        if (holding) Serial.printf("wipe: hold reset by flick after %u ms\n",
+                                   (unsigned)(millis() - press_since));
+        holding = false;
+        press_armed = false;
+        continue;
+      }
+      if (!holding) {
+        holding = true;
+        press_since = millis();
+        Serial.println("wipe: hold started");
+      }
+      deadline = millis() + TOGGLE_AWAKE_MS;
+      if (millis() - press_since >= WIPE_HOLD_MS) {
+        run_wipe_dialog();   // returns only on No
+        holding = false;
+        press_armed = false;   // re-arms once the switch is seen released
+        toggle_take();
+        refresh_battery();
+        compose(screen, s, c, true, session_start);
+        deadline = millis() + TOGGLE_AWAKE_MS;
+      }
+      delay(10);
+      continue;
+    }
+    if (holding) {
+      // Released early. Whatever the up/down contacts did while the switch
+      // was pushed in is not a flick; discard it.
+      Serial.printf("wipe: hold released after %u ms\n",
+                    (unsigned)(millis() - press_since));
+      holding = false;
+      delay(TOGGLE_DEBOUNCE_MS);
+      toggle_take();
+      continue;
+    }
     bool latched = toggle_take();
     // Read the level FIRST when there is no latch: by the time the pin is
     // sampled after a redraw the switch may already be back at rest, and the
