@@ -93,6 +93,10 @@ void draw_status_screen(LovyanGFX &g, const char *msg);
 // up/down flick maps onto them directly: No on top, Yes below.
 void draw_wipe_dialog(LovyanGFX &g, bool yes_selected);
 
+// Setup portal's first screen: a WiFi QR code for the access point, and its
+// name and password as text for anyone who cannot scan.
+void draw_join_screen(LovyanGFX &g, const char *ssid, const char *pass);
+
 int  battery_mv();   // median of several ADC reads, millivolts
 int  battery_state(int mv, int prev);   // BATT_*, with hysteresis
 void draw_main_screen(LovyanGFX &g, const State &s, const Config &c);

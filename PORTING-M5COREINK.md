@@ -553,7 +553,7 @@ Gotcha: `fs_packed.py` picks the target partition by looking for the string
 else and it silently does nothing — no error, no file.
 
 First boot has no config and drops into AP mode: join Wi-Fi `M5INK_MINIMED_MON`
-(password `123456789`), open `http://192.168.4.1`, fill in Wi-Fi / NTP /
+(the random password on the panel, or scan its QR code), open `http://192.168.4.1`, fill in Wi-Fi / NTP /
 timezone / Carelink proxy address, save. The device stores
 `/flash/minimed_config.json` and reboots. To force setup again:
 
