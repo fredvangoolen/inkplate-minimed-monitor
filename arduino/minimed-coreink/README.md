@@ -110,9 +110,24 @@ over a hiccup.
 ## Configuration
 
 Normally you never touch this: an unconfigured device starts an access
-point, `M5INK_MINIMED_MON` (password `123456789`), and serves a setup form at
+point, `M5INK_MINIMED_MON`, and serves a setup form at
 `http://192.168.4.1` — the same fields and field names as the MicroPython
 build, so the two are interchangeable to anyone who has set one up before.
+
+The access point's password is **random**, 12 characters, new each time the
+portal starts, and shown on the panel with a WiFi QR code: scan it with a
+phone camera, or type the name and password on a laptop. It used to be a fixed
+`123456789`, printed in this repo — and with WPA2, knowing the password is
+enough to decrypt a recorded setup session, home WiFi password included. The
+form itself is still plain HTTP; WPA2 under it is what protects it, and only
+while that password is secret. Once a client joins, the panel switches to the
+"connection established" screen and the password is no longer shown.
+
+It is also a **captive portal**: a DNS server on the board answers every name
+with `192.168.4.1`, so a phone's connectivity check lands on the form and the
+phone offers "sign in to network" by itself. Without that, a phone sees a
+network with no internet, keeps using mobile data, and `http://192.168.4.1`
+typed into its browser goes nowhere.
 
 One improvement over that build: `WebServer::arg()` URL-decodes, where the
 Python splits the raw query string, so a WiFi password containing `%`, `&` or

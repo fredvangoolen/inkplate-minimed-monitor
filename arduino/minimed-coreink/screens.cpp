@@ -698,3 +698,30 @@ void draw_wipe_dialog(LovyanGFX &g, bool yes_selected) {
   int hw = text_width(g, hint, FONT_LABEL);
   draw_text(g, hint, (PANEL_W - hw) / 2, PANEL_H - MARGIN - lh, FONT_LABEL, COLOR_BLACK);
 }
+
+void draw_join_screen(LovyanGFX &g, const char *ssid, const char *pass) {
+  g.fillScreen(COLOR_WHITE);
+  // The standard WiFi QR payload, read natively by Android and iOS cameras.
+  // Neither the SSID nor the generated password contains a character that
+  // this format would need escaped (; , : \ ").
+  String qr = String("WIFI:T:WPA;S:") + ssid + ";P:" + pass + ";;";
+  // 116px: version 3 is 29 modules, so 4px each, which an e-paper panel
+  // renders crisply. The panel's white surround serves as the quiet zone.
+  const int qr_w = 116;
+  g.qrcode(qr.c_str(), (PANEL_W - qr_w) / 2, 6, qr_w, 3);
+
+  int y = 6 + qr_w + 6;
+  const char *lines[] = {"Scan to join, or connect to", ssid};
+  int lh = font_height(g, FONT_LABEL);
+  for (const char *l : lines) {
+    int w = text_width(g, l, FONT_LABEL);
+    draw_text(g, l, (PANEL_W - w) / 2, y, FONT_LABEL, COLOR_BLACK);
+    y += lh + 1;
+  }
+  int pw = text_width(g, pass, FONT_UNIT);
+  draw_text(g, pass, (PANEL_W - pw) / 2, y + 1, FONT_UNIT, COLOR_BLACK);
+#if DEBUG_LAYOUT
+  Serial.printf("join: qr ends y=%d, password at y=%d w=%d h=%d\n",
+                6 + qr_w, y + 1, pw, font_height(g, FONT_UNIT));
+#endif
+}

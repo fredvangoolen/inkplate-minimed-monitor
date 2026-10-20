@@ -1001,28 +1001,113 @@ def do_ap_status(msg):
    compose(_draw, full_refresh=True)
 
 
+def random_ap_pass():
+   # A fresh access-point password every time setup starts, shown on the
+   # panel. The fixed one this replaced was printed in the repo, and with
+   # WPA2 knowing the password is enough to decrypt a recorded session -
+   # including the home WiFi password typed into the form.
+   #
+   # 12 characters from 31 that cannot be misread (no 0/o, 1/l/i), about 59
+   # bits. os.urandom() is the hardware RNG, truly random only with the radio
+   # on - so this is called after ap.active(True).
+   import os
+   alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
+   n = len(alphabet)
+   out = ""
+   while len(out) < 12:
+      b = os.urandom(1)[0]
+      if b >= 256 - (256 % n):
+         continue   # reject, so every character is equally likely
+      out += alphabet[b % n]
+   return out
+
+
+def draw_join_screen(ssid, password):
+   # A WiFi QR code a phone camera understands, plus the same details as text
+   # for a laptop. Replaced by the "connection established" status once a
+   # client joins, so the password does not stay on the panel.
+   gfx().fillScreen(WHITE)
+   qr_w = 116   # version 3 = 29 modules, 4px each
+   try:
+      gfx().qrcode("WIFI:T:WPA;S:%s;P:%s;;" % (ssid, password),
+                   (PANEL_W - qr_w)//2, 6, qr_w, 3)
+   except Exception as e:
+      # Untested on this firmware's binding; the text below still works.
+      print("QR code failed: %s" % e)
+   y = 6 + qr_w + 6
+   lh = font_height(FONT_LABEL)
+   for line in ("Scan to join, or connect to", ssid):
+      draw_text(line, (PANEL_W - text_width(line, FONT_LABEL))//2, y, FONT_LABEL, BLACK)
+      y += lh + 1
+   draw_text(password, (PANEL_W - text_width(password, FONT_UNIT))//2, y + 1,
+             FONT_UNIT, BLACK)
+
+
+def dns_reply(query, ip):
+   # Answer any A query with the portal's own address - what makes this a
+   # captive portal: the phone's connectivity check lands on the form, so it
+   # opens "sign in to network" by itself instead of staying on mobile data.
+   # Other query types get an empty answer. None = not a usable query.
+   if len(query) < 17:
+      return None
+   i = 12
+   while i < len(query) and query[i] != 0:
+      i += query[i] + 1
+   qend = i + 5                      # the 0 label, then QTYPE and QCLASS
+   if qend > len(query):
+      return None
+   is_a = query[i+1:i+3] == b"\x00\x01"
+   header = (query[:2] + b"\x81\x80" + b"\x00\x01" +
+             (b"\x00\x01" if is_a else b"\x00\x00") + b"\x00\x00\x00\x00")
+   reply = header + query[12:qend]
+   if is_a:
+      reply += (b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04" +
+                bytes([int(x) for x in ip.split(".")]))
+   return reply
+
+
 def do_access_point(ntpserver,timezone,proxyport):
    # Start access point
    ap = network.WLAN(network.AP_IF)
    ap.active(True)
    ap.config(essid=AP_SSID)
-   ap.config(authmode=3, password='123456789')
+   ap_pass = random_ap_pass()
+   ap.config(authmode=3, password=ap_pass)
    ap.config(max_clients=1)
-   do_ap_status("Device configuration needed\nConnect to WIFI network\n%s" %(AP_SSID))
+   compose(lambda: draw_join_screen(AP_SSID, ap_pass), full_refresh=True)
 
    # Wait for client to connect
    while ap.isconnected() == False:
        pass
-   do_ap_status("WIFI connection established\nLoad address %s in web browser" % (AP_ADDR))
+   do_ap_status("WIFI connection established\nThe setup page should open by itself. If not, browse to http://%s" % (AP_ADDR))
+
+   # Captive-portal DNS beside the web server, both non-blocking so one loop
+   # serves the two: see dns_reply().
+   dns = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+   dns.bind((AP_ADDR, 53))
+   dns.setblocking(False)
 
    # Get WIFI credentials via Web GUI
    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
    s.bind((AP_ADDR, 80))
    s.listen(5)
+   s.setblocking(False)
 
    while True:
+      try:
+         query, peer = dns.recvfrom(512)
+         reply = dns_reply(query, AP_ADDR)
+         if reply:
+            dns.sendto(reply, peer)
+      except OSError:
+         pass
+      try:
+         conn,addr = s.accept()
+      except OSError:
+         time.sleep_ms(10)
+         continue
+      conn.setblocking(True)
       # Get request
-      conn,addr = s.accept()
       request = str(conn.recv(1024))
       rmethod  = request.split()[0]
       rurl     = request.split()[1]
@@ -1060,6 +1145,9 @@ def do_access_point(ntpserver,timezone,proxyport):
       # Send setup page
       conn.sendall(web_page_config(ntpserver,timezone,proxyport))
       conn.close()
+
+   dns.close()
+   s.close()
 
    # Write WIFI credentials to config file
    config_write({

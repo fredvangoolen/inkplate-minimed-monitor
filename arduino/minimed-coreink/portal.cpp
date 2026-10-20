@@ -10,14 +10,23 @@
 
 #include <WiFi.h>
 #include <WebServer.h>
+#include <DNSServer.h>
 #include <Preferences.h>
 #include <M5Unified.h>
 
 static const char *AP_SSID = "M5INK_MINIMED_MON";
-static const char *AP_PASS = "123456789";
 static const char *AP_ADDR = "192.168.4.1";
 
 static WebServer server(80);
+static String ap_pass;
+// Answers every name lookup with the portal's own address. That is what
+// makes this a captive portal: a phone's connectivity check (Android's
+// generate_204, Apple's hotspot-detect) lands on the form instead of the
+// internet, so the phone opens "sign in to network" by itself. Without it a
+// phone sees a network with no internet, keeps using mobile data, and
+// 192.168.4.1 typed into its browser goes nowhere - the first test of the
+// random-password portal on a phone failed exactly that way.
+static DNSServer dns;
 static bool saved = false;
 
 // Same form as the MicroPython build serves, field names included, so the
@@ -101,12 +110,55 @@ static void status(const char *msg) {
   canvas.deleteSprite();
 }
 
+// A fresh access-point password every time the portal starts, shown on the
+// panel. The fixed one this replaced was printed in the repo, and with WPA2
+// knowing the password is enough to decrypt a recorded session - including
+// the home WiFi password typed into this form. Someone standing in front of
+// the panel can read it; someone listening from next door cannot.
+//
+// 12 characters from 31 that cannot be misread (no 0/o, 1/l/i): about 59
+// bits, far beyond what an offline attack on a recorded handshake can reach.
+// Must be called with the radio ON: esp_random() is only a true random
+// source while WiFi or Bluetooth is running.
+static String random_ap_pass() {
+  static const char ALPHABET[] = "abcdefghjkmnpqrstuvwxyz23456789";
+  const uint32_t n = sizeof(ALPHABET) - 1;
+  String out;
+  while (out.length() < 12) {
+    uint8_t b = esp_random() & 0xFF;
+    if (b >= 256 - (256 % n)) continue;   // reject, so every character is equally likely
+    out += ALPHABET[b % n];
+  }
+  return out;
+}
+
+// The join screen: a WiFi QR code a phone camera understands, plus the same
+// details as text for a laptop. Replaced by the "connection established"
+// status as soon as a client joins, so the password does not stay on the
+// panel any longer than it is needed.
+static void show_join(const char *ssid, const String &pass) {
+  M5.Display.setEpdMode(epd_mode_t::epd_quality);
+  M5Canvas canvas(&M5.Display);
+  canvas.setColorDepth(CANVAS_BPP);
+  if (!canvas.createSprite(PANEL_W, PANEL_H)) {
+    draw_join_screen(M5.Display, ssid, pass.c_str());
+    return;
+  }
+  draw_join_screen(canvas, ssid, pass.c_str());
+  canvas.pushSprite(0, 0);
+  canvas.deleteSprite();
+}
+
 static void serve(Config c, bool use_ap) {
   if (!c.ntpserver.length()) c.ntpserver = "pool.ntp.org";
 
   if (use_ap) {
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(AP_SSID, AP_PASS, 1, 0, 1);   // channel 1, not hidden, 1 client
+    WiFi.mode(WIFI_AP);                       // radio on first: see random_ap_pass()
+    ap_pass = random_ap_pass();
+    WiFi.softAP(AP_SSID, ap_pass.c_str(), 1, 0, 1);   // channel 1, not hidden, 1 client
+    // The password is deliberately not logged: the panel is where it belongs.
+    dns.setErrorReplyCode(DNSReplyCode::NoError);
+    dns.start(53, "*", WiFi.softAPIP());
     Serial.printf("portal: AP %s at %s\n", AP_SSID, AP_ADDR);
   } else {
     Serial.printf("portal: serving on http://%s/ (STA test)\n",
@@ -114,11 +166,7 @@ static void serve(Config c, bool use_ap) {
   }
 
   char msg[160];
-  if (use_ap) {
-    snprintf(msg, sizeof(msg),
-             "Device configuration needed\nConnect to WIFI network\n%s", AP_SSID);
-    status(msg);
-  }
+  if (use_ap) show_join(AP_SSID, ap_pass);
 
   bool announced = false;
 
@@ -177,10 +225,11 @@ static void serve(Config c, bool use_ap) {
   // anything - and someone is present by definition.
   while (!saved) {
     server.handleClient();
+    if (use_ap) dns.processNextRequest();
     if (use_ap && !announced && WiFi.softAPgetStationNum() > 0) {
       announced = true;
       snprintf(msg, sizeof(msg),
-               "WIFI connection established\nLoad address %s in web browser",
+               "WIFI connection established\nThe setup page should open by itself. If not, browse to http://%s",
                AP_ADDR);
       status(msg);
     }
