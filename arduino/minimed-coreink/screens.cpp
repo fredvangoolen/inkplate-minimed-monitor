@@ -601,6 +601,16 @@ void draw_info_screen(LovyanGFX &g, const State &s, const Config &c,
     snprintf(clock, sizeof(clock), "--");
   }
 
+  // Signal at the last poll, with a word for it: the number alone means
+  // nothing to most people, and this row exists so a board can be placed by
+  // walking around with it. Measured on these boards: -74 dBm gave the odd
+  // slow fetch, -79 and -82 regular ones and lookups that needed retries.
+  char signal[24];
+  if (s.rssi == 0)        snprintf(signal, sizeof(signal), "--");
+  else if (s.rssi >= -67) snprintf(signal, sizeof(signal), "%d dBm good", s.rssi);
+  else if (s.rssi >= -75) snprintf(signal, sizeof(signal), "%d dBm fair", s.rssi);
+  else                    snprintf(signal, sizeof(signal), "%d dBm weak", s.rssi);
+
   char port[8], version[16];
   snprintf(port, sizeof(port), "%u", c.proxyport);
   snprintf(version, sizeof(version), "V%s", VERSION_STR);
@@ -619,7 +629,10 @@ void draw_info_screen(LovyanGFX &g, const State &s, const Config &c,
     // several slots, "which am I on?" is the useful answer.
     {"WiFi",     s.ssid[0] ? s.ssid
                            : (c.wifi[0].ssid.length() ? c.wifi[0].ssid.c_str() : "--")},
+    {"Signal",   signal},
     {"IP",       s.ip[0] ? s.ip : "--"},
+    // Port on its own row, not as host:port, so a long host name keeps the
+    // whole width.
     {"Proxy",    c.proxyaddr.length() ? c.proxyaddr.c_str() : "--"},
     {"Port",     port},
     {"Version",  version},
