@@ -315,6 +315,7 @@ static bool http_get_at(const Config &c, const IPAddress &ip, const char *path,
                 path, c.proxyaddr.c_str());
 
   uint32_t deadline = millis() + HTTP_TIMEOUT_MS;
+  uint32_t t_date = 0;   // when the Date header arrived
   // Status line
   String line = client.readStringUntil('\n');
   if (sscanf(line.c_str(), "HTTP/%*d.%*d %d", &status) != 1) status = 0;
@@ -325,6 +326,7 @@ static bool http_get_at(const Config &c, const IPAddress &ip, const char *path,
     if (line.length() == 0) break;
     if (line.startsWith("Date:") || line.startsWith("date:")) {
       server_epoch = parse_http_date(line.substring(5));
+      t_date = millis();
     }
   }
   body = "";
@@ -336,6 +338,11 @@ static bool http_get_at(const Config &c, const IPAddress &ip, const char *path,
   }
   while (client.available()) body += (char)client.read();
   client.stop();
+  // The Date header is the server's time when the reply STARTED; the clock is
+  // set after the whole body is in. Add what the transfer took, or a slow
+  // fetch sets the clock that far back - 19.8 s on one fetch put it 17 s
+  // behind, and the RTC chip with it.
+  if (server_epoch) server_epoch += (millis() - t_date + 500) / 1000;
   return status == 200;
 }
 
@@ -1353,8 +1360,11 @@ void setup() {
   // Captured NOW, while the radio is still up. Read after WiFi.mode(WIFI_OFF)
   // it comes back 0.0.0.0, which is what the info screen was showing.
   String local_ip = WiFi.localIP().toString();
-  Serial.printf("wifi: connected in %lld ms, ip %s, ssid %s ch %d\n",
-                wifi_ms, local_ip.c_str(), WiFi.SSID().c_str(), (int)WiFi.channel());
+  // RSSI so a slow fetch can be told apart: board .14 took 19.8 s where .24,
+  // in the same spot, took 0.1 s, and nothing else in the log said why.
+  Serial.printf("wifi: connected in %lld ms, ip %s, ssid %s ch %d rssi %d\n",
+                wifi_ms, local_ip.c_str(), WiFi.SSID().c_str(), (int)WiFi.channel(),
+                (int)WiFi.RSSI());
 
 #if PORTAL_TEST
   run_config_portal_sta(cfg);   // blocks; reboots when a config is submitted

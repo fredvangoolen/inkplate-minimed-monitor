@@ -879,8 +879,9 @@ def http_get(host, port, path, timeout_s=30, connect_timeout_s=8):
    # for the full 30s on every wake, turning an outage into a flat battery.
    #
    # Note getaddrinfo() runs BEFORE the socket exists and so is covered by
-   # neither: name resolution has its own internal timeout here, unlike the
-   # Arduino build where connect() resolves inside its budget.
+   # neither: name resolution has its own internal timeout here. (The
+   # Arduino build resolves separately too, IPv4 only, and remembers the
+   # address; see its README.)
    addr = socket.getaddrinfo(host, port)[0][-1]
    s = socket.socket()
    s.settimeout(connect_timeout_s)
@@ -890,10 +891,13 @@ def http_get(host, port, path, timeout_s=30, connect_timeout_s=8):
       req = "GET /%s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n" % (path, host)
       s.send(req.encode())
       chunks = []
+      t_first = None   # when the headers, Date among them, arrived
       while True:
          data = s.recv(1024)
          if not data:
             break
+         if t_first is None:
+            t_first = time.ticks_ms()
          chunks.append(data)
    finally:
       s.close()
@@ -904,8 +908,13 @@ def http_get(host, port, path, timeout_s=30, connect_timeout_s=8):
    except (IndexError, ValueError):
       status_code = 0
    # The Date header rides along with every response, so the clock is free
-   # here - no DNS, no extra round trip, no drift between syncs.
-   return status_code, body, parse_http_date(header)
+   # here - no DNS, no extra round trip, no drift between syncs. It is the
+   # server's time when the reply STARTED, so add what the transfer took: a
+   # 19.8 s fetch on the Arduino build set the clock 17 s back without this.
+   epoch = parse_http_date(header)
+   if epoch and t_first is not None:
+      epoch += (time.ticks_diff(time.ticks_ms(), t_first) + 500) // 1000
+   return status_code, body, epoch
 
 
 #################################################
