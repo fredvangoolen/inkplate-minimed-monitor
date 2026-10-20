@@ -23,6 +23,7 @@
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_sleep.h"
+#include <lwip/netdb.h>
 #include "types.h"
 #include "screens.h"
 #include "faults.h"
@@ -173,8 +174,76 @@ static void set_clock(time_t epoch) {
 // Raw client rather than HTTPClient, for the same reason main_m5coreink.py
 // hand-rolls the request: an unattended monitor needs a hard upper bound on
 // how long a cycle can block, and the Date header has to be readable.
+// ------------------------------------------------------------- proxy address
+//
+// Looked up every cycle, IPv4 only. The address lookup was the weak link:
+// NetworkManager::hostByName asks for IPv6 FIRST once the board has a global
+// IPv6 address, the Pi answered pihole.local with one, and the proxy listens
+// on IPv4 only - so such cycles took up to 9 s or burned the 8 s connect
+// timeout and failed. Three in a row read "No link to proxy" until a cold
+// boot, which has no IPv6 address yet, cleared it. Asking for IPv4 alone
+// answered in 8 ms on the first measurement.
+//
+// No cache on purpose: a lookup per cycle also finds a proxy that moved to
+// a new address, with nothing to go stale. The time is logged every cycle;
+// if it turns out slow or unreliable, remembering the address is the next
+// step.
+static const uint32_t LOOKUP_BUDGET_MS = 20000;   // retries for a lost mDNS answer
+
+static void show_status(const char *msg);   // the panel, defined further down
+
+static bool lookup_ipv4(const char *name, uint32_t &ip) {
+  struct addrinfo hints = {};
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  struct addrinfo *res = nullptr;
+  if (lwip_getaddrinfo(name, "0", &hints, &res) != 0 || !res) return false;
+  ip = ((struct sockaddr_in *)res->ai_addr)->sin_addr.s_addr;
+  lwip_freeaddrinfo(res);
+  return true;
+}
+
+// Retries within the budget, and puts a message on the panel once a lookup
+// has to retry, rather than leaving it white for the whole wait.
+static bool proxy_address(const Config &c, IPAddress &ip) {
+  if (ip.fromString(c.proxyaddr)) return true;   // a literal address: nothing to look up
+  uint32_t t0 = millis();
+  bool shown = false;
+  for (int tries = 1; ; tries++) {
+    uint32_t raw;
+    if (lookup_ipv4(c.proxyaddr.c_str(), raw)) {
+      ip = IPAddress(raw);
+      Serial.printf("proxy: %s is %s (lookup %u ms, %d tries)\n", c.proxyaddr.c_str(),
+                    ip.toString().c_str(), (unsigned)(millis() - t0), tries);
+      return true;
+    }
+    if (millis() - t0 >= LOOKUP_BUDGET_MS) break;
+    if (!shown) {
+      String msg = "Looking for the proxy\n" + c.proxyaddr + "\nThis can take 20 seconds";
+      show_status(msg.c_str());
+      shown = true;
+    }
+    delay(500);
+  }
+  Serial.printf("proxy: lookup of %s failed after %u ms\n", c.proxyaddr.c_str(),
+                (unsigned)(millis() - t0));
+  return false;
+}
+
+static bool http_get_at(const Config &c, const IPAddress &ip, const char *path,
+                        String &body, int &status, time_t &server_epoch);
+
 static bool http_get(const Config &c, const char *path,
                      String &body, int &status, time_t &server_epoch) {
+  status = 0;
+  server_epoch = 0;
+  IPAddress ip;
+  if (!proxy_address(c, ip)) return false;
+  return http_get_at(c, ip, path, body, status, server_epoch);
+}
+
+static bool http_get_at(const Config &c, const IPAddress &ip, const char *path,
+                        String &body, int &status, time_t &server_epoch) {
   status = 0;
   server_epoch = 0;
   WiFiClient client;
@@ -187,7 +256,7 @@ static bool http_get(const Config &c, const char *path,
   // cycle is lost with only "status 0" to show for it.
   client.setTimeout(HTTP_TIMEOUT_MS);
   uint32_t t_connect = millis();
-  if (!client.connect(c.proxyaddr.c_str(), c.proxyport, HTTP_CONNECT_MS)) {
+  if (!client.connect(ip, c.proxyport, HTTP_CONNECT_MS)) {
     Serial.printf("fetch: connect failed after %u ms\n",
                   (unsigned)(millis() - t_connect));
     return false;
@@ -419,7 +488,20 @@ static bool fetch_pump_data(const Config &c, State &s) {
   if (server_epoch) {
     long drift = (long)(server_epoch - time(nullptr));
     set_clock(server_epoch);
-    if (labs(drift) >= 2) Serial.printf("clock corrected from proxy by %+ld s\n", drift);
+    if (labs(drift) >= 2) {
+      Serial.printf("clock corrected from proxy by %+ld s\n", drift);
+      // Write it to the BM8563 as well. M5.begin() sets the system clock
+      // from that chip on EVERY boot, deep-sleep wakes included
+      // (M5Unified.cpp, setSystemTimeFromRtc), and nothing ever set the chip:
+      // it had drifted ~100 s, and every wake started that far off until
+      // this correction - toggle wakes, which never fetch, stayed off. UTC,
+      // which is how setSystemTimeFromRtc() reads it back.
+      if (M5.Rtc.isEnabled()) {
+        struct tm utc;
+        gmtime_r(&server_epoch, &utc);
+        M5.Rtc.setDateTime(&utc);
+      }
+    }
   }
 
   JsonDocument doc;
@@ -905,6 +987,8 @@ static void wipe_and_restart() {
   delay(2000);
   esp_restart();
 }
+
+static void show_status(const char *msg) { show_wipe(false, msg, true); }
 
 // The confirmation dialog. Default No; up selects No, down selects Yes, and
 // a press confirms whichever is selected. Silence is No. Returns only when

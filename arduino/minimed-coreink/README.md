@@ -107,6 +107,22 @@ A total WiFi failure still just skips the cycle and retries on the next wake —
 it must never fall into AP setup mode, which would strand a working monitor
 over a hiccup.
 
+## Finding the proxy by name: IPv4 only
+
+A proxy given as a name (`pihole.local`) is looked up every cycle, asking for
+an **IPv4** address only. The core's own lookup (`NetworkManager::hostByName`)
+asks for IPv6 first as soon as the board has a global IPv6 address. On a
+network with IPv6 the Pi answers with one, the proxy listens on IPv4 only,
+and the connect then fails after 8 s. Three such cycles read *No link to
+proxy*, and a cold boot cleared it only until the board got its IPv6 address
+again. Measured: fetches of 2.9 s and 9.0 s and intermittent "No link"
+before; an 8 ms lookup and 0.1 s fetches after.
+
+A lookup that has to retry shows *Looking for the proxy* on the panel instead
+of leaving it white, and gives up after 20 s. Every lookup logs its time; if
+they turn out slow, remembering the address across deep sleep is the next
+step. An address entered as a number is used as-is.
+
 ## Configuration
 
 Normally you never touch this: an unconfigured device starts an access
