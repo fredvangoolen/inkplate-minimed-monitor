@@ -419,7 +419,20 @@ static bool fetch_pump_data(const Config &c, State &s) {
   if (server_epoch) {
     long drift = (long)(server_epoch - time(nullptr));
     set_clock(server_epoch);
-    if (labs(drift) >= 2) Serial.printf("clock corrected from proxy by %+ld s\n", drift);
+    if (labs(drift) >= 2) {
+      Serial.printf("clock corrected from proxy by %+ld s\n", drift);
+      // Write it to the BM8563 as well. M5.begin() sets the system clock
+      // from that chip on EVERY boot, deep-sleep wakes included
+      // (M5Unified.cpp, setSystemTimeFromRtc), and nothing ever set the chip:
+      // it had drifted ~100 s, and every wake started that far off until
+      // this correction - toggle wakes, which never fetch, stayed off. UTC,
+      // which is how setSystemTimeFromRtc() reads it back.
+      if (M5.Rtc.isEnabled()) {
+        struct tm utc;
+        gmtime_r(&server_epoch, &utc);
+        M5.Rtc.setDateTime(&utc);
+      }
+    }
   }
 
   JsonDocument doc;
