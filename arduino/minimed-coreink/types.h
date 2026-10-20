@@ -86,6 +86,7 @@ struct State {
   time_t alarm_local;
   char ip[16];
   char ssid[33];             // the network actually in use, for the info screen
+  int rssi;                  // its signal at the last poll, dBm; 0 = not measured
   int dstDelta;
   int link;                  // one of LINK_*, why there is no reading
   // Which battery step is showing. Carried rather than recomputed per draw

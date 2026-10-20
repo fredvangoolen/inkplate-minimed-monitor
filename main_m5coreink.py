@@ -721,6 +721,7 @@ def make_snapshot(state, ip):
       "dst": dstDelta,
       "stats": state["stats"],
       "ip": ip,
+      "rssi": state.get("rssi"),
       # The pump screen's fields. Without these a toggle wake would draw it
       # empty, since that path deliberately never touches the network.
       "batt": state["battery_pct"],
@@ -752,6 +753,7 @@ def state_from_snapshot(snap):
    st["reservoir_pct"] = snap.get("resp")
    st["sage_hours"] = snap.get("sage", 255)
    st["patient"] = snap.get("pat")
+   st["rssi"] = snap.get("rssi")
    dstDelta = snap.get("dst", 0)
    if snap.get("upd") is not None:
       st["last_update_tm"] = time.localtime(snap["upd"])
@@ -2182,12 +2184,27 @@ def draw_info_screen(state, cfg, ip):
    #    nearly all its life on USB, so there is no measured discharge curve
    #    for this actual cell yet; log voltage per cycle through one full
    #    run-down before trusting them.
+   # Signal at the last poll, with a word for it, so a board can be placed by
+   # walking around with it. Thresholds from the Arduino build's measurements.
+   rssi = state.get("rssi")
+   if not rssi:
+      signal = "--"
+   elif rssi >= -67:
+      signal = "%d dBm good" % rssi
+   elif rssi >= -75:
+      signal = "%d dBm fair" % rssi
+   else:
+      signal = "%d dBm weak" % rssi
+
    rows = (
       ("Battery",  batt),
       ("Runtime",  fmt_runtime(session_start[0])),
       ("Time",     clock),
       ("WiFi",     wifissid or "--"),
+      ("Signal",   signal),
       ("IP",       ip or "--"),
+      # Port on its own row, not as host:port, so a long host name keeps
+      # the whole width.
       ("Proxy",    proxyaddr or "--"),
       ("Port",     str(proxyport or "--")),
       ("Version",  "V%s" % VERSION),
@@ -2936,6 +2953,11 @@ def main():
                ip = wlan.ifconfig()[0]
             except Exception:
                ip = None
+            # Read now: the radio goes down before the snapshot is taken.
+            try:
+               state["rssi"] = wlan.status('rssi')
+            except Exception:
+               state["rssi"] = None
 
             # The network is finished with for this cycle, and the WiFi stack
             # is holding ~45KB of the IDF heap that the drawing buffer needs.

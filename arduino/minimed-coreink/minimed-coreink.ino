@@ -926,7 +926,7 @@ static void arm_toggle_wake() {
 //
 // A plain struct, where MicroPython had to serialise JSON in and out of RTC
 // memory and re-hydrate it - about 120 lines that simply do not exist here.
-#define RTC_MAGIC 0x4D4D0308u   // bump when the layout changes (State lost the charging fields)
+#define RTC_MAGIC 0x4D4D0309u   // bump when the layout changes (State gained rssi)
 
 struct RtcState {
   uint32_t magic;
@@ -1360,6 +1360,7 @@ void setup() {
   // Captured NOW, while the radio is still up. Read after WiFi.mode(WIFI_OFF)
   // it comes back 0.0.0.0, which is what the info screen was showing.
   String local_ip = WiFi.localIP().toString();
+  int wifi_rssi = WiFi.RSSI();   // read now: the radio goes down before the snapshot
   // RSSI so a slow fetch can be told apart: board .14 took 19.8 s where .24,
   // in the same spot, took 0.1 s, and nothing else in the log said why.
   Serial.printf("wifi: connected in %lld ms, ip %s, ssid %s ch %d rssi %d\n",
@@ -1495,6 +1496,7 @@ void setup() {
     }
     snprintf(s.ip, sizeof(s.ip), "%s", local_ip.c_str());
     snprintf(s.ssid, sizeof(s.ssid), "%s", cfg.wifi[slot].ssid.c_str());
+    s.rssi = wifi_rssi;
     rtc.snap = s;
     // Anchor the cadence on the fetch, not on the wake, so the tail of the
     // cycle never shifts the schedule.
