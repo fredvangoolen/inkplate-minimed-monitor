@@ -23,6 +23,7 @@
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_sleep.h"
+#include "esp_rom_crc.h"
 #include <lwip/netdb.h>
 #include "types.h"
 #include "screens.h"
@@ -176,21 +177,39 @@ static void set_clock(time_t epoch) {
 // how long a cycle can block, and the Date header has to be readable.
 // ------------------------------------------------------------- proxy address
 //
-// Looked up every cycle, IPv4 only. The address lookup was the weak link:
-// NetworkManager::hostByName asks for IPv6 FIRST once the board has a global
-// IPv6 address, the Pi answered pihole.local with one, and the proxy listens
-// on IPv4 only - so such cycles took up to 9 s or burned the 8 s connect
-// timeout and failed. Three in a row read "No link to proxy" until a cold
-// boot, which has no IPv6 address yet, cleared it. Asking for IPv4 alone
-// answered in 8 ms on the first measurement.
+// IPv4 only. NetworkManager::hostByName asks for IPv6 FIRST once the board
+// has a global IPv6 address, the Pi answered pihole.local with one, and the
+// proxy listens on IPv4 only - so such cycles took up to 9 s or burned the
+// 8 s connect timeout and failed. Three in a row read "No link to proxy"
+// until a cold boot, which has no IPv6 address yet, cleared it.
 //
-// No cache on purpose: a lookup per cycle also finds a proxy that moved to
-// a new address, with nothing to go stale. The time is logged every cycle;
-// if it turns out slow or unreliable, remembering the address is the next
-// step.
+// And looked up once, then remembered across deep sleep; looked up again
+// only when the remembered address stops answering. The lookup is mDNS -
+// multicast, which WiFi does not retransmit - so even IPv4-only it took
+// 2.2 s once (a microwave was running on the same 2.4 GHz band). A proxy is
+// a Pi on a cable whose DHCP lease rarely changes, so the lookup is almost
+// never needed. The cache is keyed by the configured name, so a changed
+// setting cannot reuse an address that belonged to the old one.
 static const uint32_t LOOKUP_BUDGET_MS = 20000;   // retries for a lost mDNS answer
 
+RTC_DATA_ATTR static uint32_t proxy_ip_cached;    // network byte order; 0 = none
+RTC_DATA_ATTR static uint32_t proxy_name_crc;
+
+// 1 = poison the cache on the first warm wake, to exercise the path that
+// finds a proxy which moved. Test builds only.
+#ifndef DEBUG_STALE_PROXY
+#define DEBUG_STALE_PROXY 0
+#endif
+
 static void show_status(const char *msg);   // the panel, defined further down
+
+static uint32_t name_crc(const String &name) {
+  return esp_rom_crc32_le(0, (const uint8_t *)name.c_str(), name.length());
+}
+
+static bool cache_valid(const Config &c) {
+  return proxy_ip_cached && proxy_name_crc == name_crc(c.proxyaddr);
+}
 
 static bool lookup_ipv4(const char *name, uint32_t &ip) {
   struct addrinfo hints = {};
@@ -203,15 +222,26 @@ static bool lookup_ipv4(const char *name, uint32_t &ip) {
   return true;
 }
 
-// Retries within the budget, and puts a message on the panel once a lookup
-// has to retry, rather than leaving it white for the whole wait.
-static bool proxy_address(const Config &c, IPAddress &ip) {
+static void show_looking(const Config &c) {
+  String msg = "Looking for the proxy\n" + c.proxyaddr + "\nThis can take 20 seconds";
+  show_status(msg.c_str());
+}
+
+// fresh = ignore the cache. Retries within the budget, and puts a message on
+// the panel once it has to retry (unless the caller already did), rather
+// than leaving it white for the whole wait.
+static bool proxy_address(const Config &c, bool fresh, bool shown, IPAddress &ip) {
   if (ip.fromString(c.proxyaddr)) return true;   // a literal address: nothing to look up
+  if (!fresh && cache_valid(c)) {
+    ip = IPAddress(proxy_ip_cached);
+    return true;
+  }
   uint32_t t0 = millis();
-  bool shown = false;
   for (int tries = 1; ; tries++) {
     uint32_t raw;
     if (lookup_ipv4(c.proxyaddr.c_str(), raw)) {
+      proxy_ip_cached = raw;
+      proxy_name_crc = name_crc(c.proxyaddr);
       ip = IPAddress(raw);
       Serial.printf("proxy: %s is %s (lookup %u ms, %d tries)\n", c.proxyaddr.c_str(),
                     ip.toString().c_str(), (unsigned)(millis() - t0), tries);
@@ -219,26 +249,46 @@ static bool proxy_address(const Config &c, IPAddress &ip) {
     }
     if (millis() - t0 >= LOOKUP_BUDGET_MS) break;
     if (!shown) {
-      String msg = "Looking for the proxy\n" + c.proxyaddr + "\nThis can take 20 seconds";
-      show_status(msg.c_str());
+      show_looking(c);
       shown = true;
     }
     delay(500);
   }
   Serial.printf("proxy: lookup of %s failed after %u ms\n", c.proxyaddr.c_str(),
                 (unsigned)(millis() - t0));
+  proxy_ip_cached = 0;
   return false;
 }
 
 static bool http_get_at(const Config &c, const IPAddress &ip, const char *path,
                         String &body, int &status, time_t &server_epoch);
 
+// Connects to the remembered address; if nothing answers there, looks the
+// name up again and tries once more - which is how a proxy that moved to a
+// new address is found without a reboot.
 static bool http_get(const Config &c, const char *path,
                      String &body, int &status, time_t &server_epoch) {
   status = 0;
   server_epoch = 0;
+#if DEBUG_STALE_PROXY
+  static bool poisoned = false;
+  if (!poisoned && cache_valid(c) && esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+    poisoned = true;
+    proxy_ip_cached = IPAddress(192, 168, 1, 250);
+    Serial.println("proxy: DEBUG cache poisoned with 192.168.1.250");
+  }
+#endif
   IPAddress ip;
-  if (!proxy_address(c, ip)) return false;
+  bool was_cached = cache_valid(c);
+  if (!proxy_address(c, false, false, ip)) return false;
+  if (http_get_at(c, ip, path, body, status, server_epoch)) return true;
+  // Something answered, or the address was just looked up: a new lookup
+  // would find the same thing.
+  if (status != 0 || !was_cached) return false;
+  Serial.printf("proxy: %s not answering, looking %s up again\n",
+                ip.toString().c_str(), c.proxyaddr.c_str());
+  show_looking(c);
+  if (!proxy_address(c, true, true, ip)) return false;
   return http_get_at(c, ip, path, body, status, server_epoch);
 }
 
