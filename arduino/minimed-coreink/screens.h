@@ -75,7 +75,7 @@ enum { BATT_EMPTY = 0, BATT_HALF = 1, BATT_FULL = 2 };
 // sits between the glucose stats and the technical screen, as in the
 // MicroPython build.
 enum { SCREEN_MAIN = 0, SCREEN_STATS = 1, SCREEN_PUMP = 2, SCREEN_INFO = 3,
-       SCREEN_COUNT = 4 };
+       SCREEN_COMMS = 4, SCREEN_COUNT = 5 };
 
 // Which way a flick moves through that list. Down walks forward in the order
 // above; up walks back the way you came, which is the only reason the second

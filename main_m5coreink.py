@@ -608,7 +608,8 @@ SCREEN_MAIN  = 0
 SCREEN_STATS = 1
 SCREEN_PUMP  = 2
 SCREEN_INFO  = 3
-SCREEN_COUNT = 4
+SCREEN_COMMS = 4   # the chain pump -> phone -> CareLink -> proxy -> display
+SCREEN_COUNT = 5
 
 # Which way a flick moves through that list. Down walks forward through the
 # screens; up walks back the way you came, which is the only reason the
@@ -722,6 +723,7 @@ def make_snapshot(state, ip):
       "stats": state["stats"],
       "ip": ip,
       "rssi": state.get("rssi"),
+      "sst": state.get("sage_state"),
       # The pump screen's fields. Without these a toggle wake would draw it
       # empty, since that path deliberately never touches the network.
       "batt": state["battery_pct"],
@@ -754,6 +756,8 @@ def state_from_snapshot(snap):
    st["sage_hours"] = snap.get("sage", 255)
    st["patient"] = snap.get("pat")
    st["rssi"] = snap.get("rssi")
+   st["comms"] = snap.get("comms") or {}
+   st["sage_state"] = snap.get("sst", st.get("sage_state"))
    dstDelta = snap.get("dst", 0)
    if snap.get("upd") is not None:
       st["last_update_tm"] = time.localtime(snap["upd"])
@@ -873,6 +877,10 @@ def set_clock(epoch):
       return False
 
 
+# The address the last lookup gave, for the Communication screen.
+_last_proxy_ip = [None]
+
+
 def http_get(host, port, path, timeout_s=30, connect_timeout_s=8):
    # Two budgets, not one. The read stays generous - a weak signal can
    # stretch it, and cutting a reply short costs a whole cycle - but the
@@ -885,6 +893,7 @@ def http_get(host, port, path, timeout_s=30, connect_timeout_s=8):
    # Arduino build resolves separately too, IPv4 only, and remembers the
    # address; see its README.)
    addr = socket.getaddrinfo(host, port)[0][-1]
+   _last_proxy_ip[0] = addr[0] if isinstance(addr, tuple) else None
    s = socket.socket()
    s.settimeout(connect_timeout_s)
    try:
@@ -1261,24 +1270,34 @@ def wlan_connect(wifissid, wifipass):
 #
 #################################################
 
-def time_delta(tm,now,timezone):
-   if tm != None and now != None:
-      delta_min  = now[4] - tm[4]
-      if delta_min < 0:
-         delta_min += 60
-      delta_hour = now[3] - tm[3]
-      if delta_hour < 0:
-         delta_hour += 24
+# Past this the reading is called out in the banner, not left to the small
+# Updated line: the pump uploads every 5 minutes and the display lags it by up
+# to two cycles, so 20 minutes is well past normal.
+STALE_READING_S = 20 * 60
 
-      if delta_min == 0 and delta_hour == 0:
-         delta_txt = "Now"
-      elif delta_min > 15 or delta_hour > 1:
-         delta_txt = "No data"
-      else:
-         delta_txt = str(delta_min)+" min ago"
-   else:
-      delta_txt = "---"
-   return delta_txt
+
+def reading_age_s(state):
+   # From the two epochs, not from clock fields. The field version this
+   # replaced compared hours and minutes separately, so a reading from 09:33
+   # shown at 10:38 read "5 min ago", and past 15 minutes it said "No data"
+   # although there was data, just old. Both sides are in this firmware's own
+   # epoch (time.mktime of a time.localtime), so the difference is exact.
+   tm = state.get("last_update_tm")
+   if tm is None:
+      return None
+   return max(0, int(time.time() - time.mktime(tm)))
+
+
+def age_txt(age_s):
+   m = age_s // 60
+   if m < 1:
+      return "now"
+   if m < 60:
+      return "%d min" % m
+   if m < 24 * 60:
+      return "%d h %d min" % (m // 60, m % 60)
+   d = m // (24 * 60)
+   return "1 day" if d == 1 else "%d days" % d
 
 
 # Trend as (direction, count) rather than main.py's ASCII "^^^"/"vvv"
@@ -1548,6 +1567,7 @@ def handle_pumpdataupdate(proxyaddr, proxyport, timezone):
    # correct clock the device has had.
    if server_epoch:
       drift = server_epoch - time.time()
+      state["clock_fix"] = int(drift)
       if set_clock(server_epoch) and abs(drift) >= 2:
          print("Clock corrected from proxy by %+d s" % drift)
 
@@ -1621,6 +1641,10 @@ def handle_pumpdataupdate(proxyaddr, proxyport, timezone):
          state["sage_hours"] = data["sensorDurationHours"]
          state["sage_state"] = data["sensorState"]
       state["sensor_ok"] = bool(data.get("conduitSensorInRange"))
+      # Which hop of pump -> phone -> CareLink is broken, for the
+      # Communication screen. Absent stays None, not "out of range".
+      state["pump_in_range"] = data.get("conduitMedicalDeviceInRange")
+      state["phone_in_range"] = data.get("conduitInRange")
       # The proxy already knows who the pump belongs to, so the configured
       # name is only a label to override it with - see draw_pump_screen().
       state["patient"] = data.get("firstName")
@@ -1810,8 +1834,22 @@ def draw_screen(state):
    # An alarm outranks everything; a link fault outranks the generic pump
    # banner, because when the link is down that banner is as stale as the
    # reading and saying so is more use than repeating it.
+   # Then a reading that has stopped moving although everything answers:
+   # phone out of range of the pump, phone offline, or a proxy stuck on one
+   # fetch. It outranks the pump banner, which is exactly as old.
+   age_s = reading_age_s(state)
+   stale_text = ("No new reading for %s" % age_txt(age_s)
+                 if age_s is not None and age_s >= STALE_READING_S else None)
+   link = state.get("link", LINK_OK)
+   link_text = LINK_TEXT.get(link)
+   if link == LINK_NO_SENSOR and age_s is not None:
+      # With its age: "No sensor data" is not proof the proxy is fetching
+      # NOW. A proxy stuck during a sensor gap would show it forever; the age
+      # keeps counting either way.
+      link_text = "%s (%s)" % (link_text, age_txt(age_s))
    banner_text = (state["alarm_text"]
-                  or LINK_TEXT.get(state.get("link", LINK_OK))
+                  or link_text
+                  or stale_text
                   or state["banner"])
    has_banner = bool(banner_text)
 
@@ -1942,9 +1980,9 @@ def draw_screen(state):
    # less important one. An insulin figure is a value worth enlarging; a
    # wall-clock time is not.
    row_b_y = row_a_y + row_a_h + 6
-   if state["last_update_tm"] is not None:
+   if age_s is not None:
       now = local_now(current_timezone[0], dstDelta)
-      delta_txt = time_delta(state["last_update_tm"], now, current_timezone[0])
+      delta_txt = "now" if age_s < 60 else "%s ago" % age_txt(age_s)
       draw_kv_row(row_b_y, "Updated %s" % delta_txt, FONT_LABEL,
                   "%02d:%02d" % (now[3], now[4]), FONT_LABEL, BLACK)
    else:
@@ -2233,6 +2271,57 @@ def draw_info_screen(state, cfg, ip):
 FULL_REFRESH_EVERY = 12
 
 
+def draw_comms_screen(state):
+   # The chain from pump to panel, one hop per row, for working out WHERE it
+   # broke without a laptop. Times as ages: "12:03" needs the current time to
+   # read. Same rows as the Arduino build.
+   gfx().fillScreen(WHITE)
+   y = draw_screen_header("COMMUNICATION")
+   c = state.get("comms") or {}
+
+   def ago(t):
+      if not t:
+         return "--"
+      a = max(0, int(time.time() - t))
+      return "now" if a < 60 else "%s ago" % age_txt(a)
+
+   def yn(v):
+      return "--" if v is None else ("yes" if v else "no")
+
+   answer = {LINK_OK: "reading", LINK_NO_SENSOR: "no sensor value",
+             LINK_PROXY_NO_DATA: "no data", LINK_PROXY_LOGIN: "login needed",
+             LINK_NO_PROXY: "no answer"}.get(c.get("raw"), "--")
+   good = ago(c.get("ok_at"))
+   if c.get("fail") and c.get("ok_at"):
+      good += ", %d failed" % c["fail"]
+   if not c.get("at"):
+      timing = "--"
+   elif not c.get("wifi_ms"):
+      timing = "no WiFi"
+   elif c.get("raw") == LINK_NO_PROXY:
+      timing = "- / %.1f s" % (c["wifi_ms"] / 1000)
+   else:
+      timing = "%d ms / %.1f s" % (c.get("fetch_ms", 0), c["wifi_ms"] / 1000)
+   sst = state.get("sage_state")
+   sensor = "--" if not sst else ("ok" if sst == "NO_ERROR_MESSAGE" else sst)
+   upd = state.get("last_update_tm")
+   rows = (
+      ("Pump near phone", yn(c.get("pump"))),
+      ("Phone online",    yn(c.get("phone"))),
+      ("Last upload",     ago(time.mktime(upd)) if upd else "--"),
+      ("Sensor",          sensor),
+      ("Proxy answer",    answer),
+      ("Good fetch",      good),
+      ("Fetch / WiFi",    timing),
+      ("Proxy IP",        c.get("ip") or "--"),
+      ("Clock fix",       "%+d s" % c["clock"] if c.get("clock") is not None and c.get("at") else "--"),
+   )
+   lh = font_height(FONT_LABEL)
+   for label, value in rows:
+      draw_kv_row(y, label, FONT_LABEL, value, FONT_LABEL, BLACK)
+      y += lh + 5
+
+
 def draw_current_screen(screen, state, cfg, ip, full_refresh=False):
    # Sample the battery and decide its step here: this is the one choke point
    # every draw passes through, and on every path the radio is already down by
@@ -2249,6 +2338,8 @@ def draw_current_screen(screen, state, cfg, ip, full_refresh=False):
       compose(lambda: draw_pump_screen(state, cfg), full_refresh)
    elif screen == SCREEN_INFO:
       compose(lambda: draw_info_screen(state, cfg, ip), full_refresh)
+   elif screen == SCREEN_COMMS:
+      compose(lambda: draw_comms_screen(state), full_refresh)
    else:
       compose(lambda: draw_screen(state), full_refresh)
 
@@ -2897,7 +2988,10 @@ def main():
       if not toggle_only:
          screen = SCREEN_MAIN
 
+         t_wifi = time.ticks_ms()
          wlan = wlan_connect(wifissid, wifipass)
+         wifi_ms = time.ticks_diff(time.ticks_ms(), t_wifi)
+         prev_comms = dict(snap.get("comms") or {}) if snap else {}
          if not wlan.isconnected():
             # Skipping the FETCH is right; skipping the DRAW is not. The
             # firmware clears the panel on every boot, so returning to sleep
@@ -2909,6 +3003,9 @@ def main():
                snap["fail"] = fails
                if fails >= LINK_FAULT_STREAK:
                   snap["link"] = LINK_NO_PROXY
+               prev_comms.update({"raw": LINK_NO_PROXY, "fail": fails,
+                                  "wifi_ms": 0, "fetch_ms": 0, "at": time.time()})
+               snap["comms"] = prev_comms
             print("WiFi unavailable this cycle (streak %d/%d), panel %s" %
                   (fails, LINK_FAULT_STREAK,
                    "will name the fault" if fails >= LINK_FAULT_STREAK
@@ -2937,7 +3034,10 @@ def main():
                print("NTP synced: %s (fallback: no clock yet)" % ntp_synced)
             note_session_start()   # first valid clock since power-on starts it
 
+            t_fetch = time.ticks_ms()
             state = handle_pumpdataupdate(proxyaddr, proxyport, timezone)
+            fetch_ms = time.ticks_diff(time.ticks_ms(), t_fetch)
+            raw_link = state["link"]
 
             # Beep BEFORE the panel refresh, not after: the point of the sound
             # is to summon someone who isn't looking at the device, so it
@@ -2981,10 +3081,24 @@ def main():
             fails = ((snap.get("fail", 0) if snap else 0) + 1) if faulted else 0
             confirmed = faulted and fails >= LINK_FAULT_STREAK
             proxy_empty = state["link"] in (LINK_PROXY_NO_DATA, LINK_PROXY_LOGIN)
+            # The Communication screen's view of this poll, kept on EVERY
+            # path - the failed polls are the ones it exists to explain.
+            got_answer = raw_link in (LINK_OK, LINK_NO_SENSOR)
+            comms = {
+               "pump": state.get("pump_in_range", prev_comms.get("pump")),
+               "phone": state.get("phone_in_range", prev_comms.get("phone")),
+               "raw": raw_link, "fail": fails,
+               "fetch_ms": fetch_ms, "wifi_ms": wifi_ms or 1,
+               "clock": state.get("clock_fix", prev_comms.get("clock")),
+               "at": time.time(),
+               "ok_at": time.time() if got_answer else prev_comms.get("ok_at"),
+               "ip": _last_proxy_ip[0] or prev_comms.get("ip"),
+            }
 
             if proxy_empty:
                if snap is not None:
                   snap["fail"] = fails
+                  snap["comms"] = comms
                   if confirmed:
                      snap["link"] = state["link"]
                state = state_from_snapshot(snap)
@@ -3002,6 +3116,8 @@ def main():
                state["last_good_sg"] = state["sg"] or (snap.get("lastsg") if snap else None)
                snap = make_snapshot(state, ip)
                snap["fail"] = fails
+               snap["comms"] = comms
+               state["comms"] = comms
 
             next_poll = time.time() + POLL_PERIOD_S
 
