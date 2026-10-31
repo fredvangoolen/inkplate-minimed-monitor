@@ -176,15 +176,31 @@ static void local_tm(time_t utc, int tz_hours, int dst, struct tm &out) {
 
 // Same rule as main.py: minute/hour fields only, and anything past 15
 // minutes or an hour is reported as no data rather than a large number.
-static void time_delta_txt(const struct tm &upd, const struct tm &now,
-                           char *out, size_t n) {
-  int dmin = now.tm_min - upd.tm_min;
-  if (dmin < 0) dmin += 60;
-  int dhour = now.tm_hour - upd.tm_hour;
-  if (dhour < 0) dhour += 24;
-  if (dmin == 0 && dhour == 0)      snprintf(out, n, "Now");
-  else if (dmin > 15 || dhour > 1)  snprintf(out, n, "No data");
-  else                              snprintf(out, n, "%d min ago", dmin);
+// How old the reading is, from the two epochs rather than from clock fields.
+// The field version this replaced compared hours and minutes separately, so a
+// reading from 09:33 shown at 10:38 read "5 min ago", and past 15 minutes it
+// said "No data" although there was data, just old. A proxy stuck on one
+// reading for hours looked almost normal (carelink-piet, 2026-10-31).
+static void age_txt(long age_s, char *out, size_t n) {
+  long m = age_s / 60;
+  if (m < 1)              snprintf(out, n, "now");
+  else if (m < 60)        snprintf(out, n, "%ld min", m);
+  else if (m < 24 * 60)   snprintf(out, n, "%ld h %ld min", m / 60, m % 60);
+  else if (m < 48 * 60)   snprintf(out, n, "1 day");
+  else                    snprintf(out, n, "%ld days", m / (24 * 60));
+}
+
+// Past this the reading is called out in the banner, not left to the small
+// Updated line. The pump uploads every 5 minutes and the display lags it by
+// up to two cycles, so 20 minutes is well past normal and still short of
+// anything a caregiver would want to discover by accident.
+static const long STALE_READING_S = 20 * 60;
+
+static long reading_age_s(const State &s) {
+  time_t now = time(nullptr);
+  if (!s.lastUpdate || now < 1600000000) return -1;   // no reading, or no clock
+  long age = (long)(now - s.lastUpdate);
+  return age < 0 ? 0 : age;
 }
 
 // The device battery, as a battery symbol: an outlined body with a nub on the
@@ -286,8 +302,22 @@ void draw_main_screen(LovyanGFX &g, const State &s, const Config &c) {
     } else {
       snprintf(banner_buf, sizeof(banner_buf), "%s", s.alarm_text);
     }
+  } else if (s.link == LINK_NO_SENSOR && reading_age_s(s) >= 0) {
+    // With its age: "No sensor data" is not proof the proxy is fetching NOW.
+    // A proxy stuck during a sensor gap would show it forever; the age keeps
+    // counting either way, so a few minutes reads as routine and hours do not.
+    char age[24];
+    age_txt(reading_age_s(s), age, sizeof(age));
+    snprintf(banner_buf, sizeof(banner_buf), "%s (%s)", link_text(s.link), age);
   } else if (s.link != LINK_OK) {
     snprintf(banner_buf, sizeof(banner_buf), "%s", link_text(s.link));
+  } else if (reading_age_s(s) >= STALE_READING_S) {
+    // Everything answers, but the reading does not move: phone out of range
+    // of the pump, phone offline, or a proxy stuck on one fetch. Outranks the
+    // pump banner, which is exactly as old as the reading.
+    char age[24];
+    age_txt(reading_age_s(s), age, sizeof(age));
+    snprintf(banner_buf, sizeof(banner_buf), "No new reading for %s", age);
   } else {
     snprintf(banner_buf, sizeof(banner_buf), "%s", s.banner);
   }
@@ -398,14 +428,15 @@ void draw_main_screen(LovyanGFX &g, const State &s, const Config &c) {
   // 9:51 and the panel last redrew at 9:55. A timestamp that stops
   // advancing is how you notice the device died.
   int row_b_y = row_a_y + row_a_h + 6;
-  if (s.lastUpdate) {
-    struct tm tm_now, tm_upd;
+  long age_s = reading_age_s(s);
+  if (age_s >= 0) {
+    struct tm tm_now;
     local_tm(time(nullptr), c.timezone, s.dstDelta, tm_now);
-    local_tm(s.lastUpdate, c.timezone, s.dstDelta, tm_upd);
     char delta[24], clock[8], label[40];
-    time_delta_txt(tm_upd, tm_now, delta, sizeof(delta));
+    age_txt(age_s, delta, sizeof(delta));
     snprintf(clock, sizeof(clock), "%02d:%02d", tm_now.tm_hour, tm_now.tm_min);
-    snprintf(label, sizeof(label), "Updated %s", delta);
+    if (age_s < 60) snprintf(label, sizeof(label), "Updated now");
+    else            snprintf(label, sizeof(label), "Updated %s ago", delta);
     // Both halves in the small font: at the larger size the clock is wide
     // enough to squeeze the label past its truncation point, and the label
     // is where the staleness lives.
@@ -647,12 +678,85 @@ void draw_info_screen(LovyanGFX &g, const State &s, const Config &c,
   }
 }
 
+// The chain from pump to panel, one hop per row, for working out WHERE it
+// broke without a laptop: pump -> phone -> CareLink -> proxy -> display.
+// Plain words where the raw value would mean nothing to the person holding
+// the device; times as ages, because "12:03" needs the current time to read.
+static void ago_or_dash(time_t t, char *out, size_t n) {
+  time_t now = time(nullptr);
+  if (!t || now < 1600000000) { snprintf(out, n, "--"); return; }
+  long age = (long)(now - t);
+  if (age < 0) age = 0;
+  if (age < 60) { snprintf(out, n, "now"); return; }
+  char a[24];
+  age_txt(age, a, sizeof(a));
+  snprintf(out, n, "%s ago", a);
+}
+
+static const char *yes_no(int8_t v, const char *yes, const char *no) {
+  return v < 0 ? "--" : (v ? yes : no);
+}
+
+static const char *proxy_answer(int raw) {
+  switch (raw) {
+    case LINK_OK:            return "reading";
+    case LINK_NO_SENSOR:     return "no sensor value";
+    case LINK_PROXY_NO_DATA: return "no data";
+    case LINK_PROXY_LOGIN:   return "login needed";
+    case LINK_NO_PROXY:      return "no answer";
+    default:                 return "--";
+  }
+}
+
+void draw_comms_screen(LovyanGFX &g, const State &s) {
+  g.fillScreen(COLOR_WHITE);
+  int y = draw_screen_header(g, "COMMUNICATION");
+
+  char upload[24], fetched[40], timing[24], clockfix[16], sensor[24];
+  ago_or_dash(s.lastUpdate, upload, sizeof(upload));
+  ago_or_dash(s.lastFetchOk, fetched, sizeof(fetched));
+  if (s.failStreak && s.lastFetchOk) {
+    size_t l = strlen(fetched);
+    snprintf(fetched + l, sizeof(fetched) - l, ", %u failed", (unsigned)s.failStreak);
+  }
+  if (!s.wifiMs)              snprintf(timing, sizeof(timing), "no WiFi");
+  else if (s.rawLink == LINK_NO_PROXY)
+                              snprintf(timing, sizeof(timing), "- / %.1f s", s.wifiMs / 1000.0f);
+  else                        snprintf(timing, sizeof(timing), "%u ms / %.1f s",
+                                       (unsigned)s.fetchMs, s.wifiMs / 1000.0f);
+  if (!s.lastAttempt)         snprintf(timing, sizeof(timing), "--");
+  snprintf(clockfix, sizeof(clockfix), "%+ld s", (long)s.clockFix);
+  // The proxy passes sensorState through as Medtronic spells it; the common
+  // healthy value gets a word, the rest stay recognisable for a search.
+  if (!s.sensorState[0])                              snprintf(sensor, sizeof(sensor), "--");
+  else if (!strcmp(s.sensorState, "NO_ERROR_MESSAGE")) snprintf(sensor, sizeof(sensor), "ok");
+  else                                                snprintf(sensor, sizeof(sensor), "%s", s.sensorState);
+
+  struct { const char *label; const char *value; } rows[] = {
+    {"Pump near phone", yes_no(s.pumpInRange, "yes", "no")},
+    {"Phone online",    yes_no(s.phoneInRange, "yes", "no")},
+    {"Last upload",     upload},
+    {"Sensor",          sensor},
+    {"Proxy answer",    proxy_answer(s.rawLink)},
+    {"Good fetch",      fetched},
+    {"Fetch / WiFi",    timing},
+    {"Proxy IP",        s.proxyIp[0] ? s.proxyIp : "--"},
+    {"Clock fix",       s.lastAttempt ? clockfix : "--"},
+  };
+  int lh = font_height(g, FONT_LABEL);
+  for (auto &r : rows) {
+    draw_kv_row(g, y, r.label, FONT_LABEL, r.value, FONT_LABEL, COLOR_BLACK);
+    y += lh + 5;
+  }
+}
+
 void draw_current_screen(LovyanGFX &g, int screen, const State &s,
                          const Config &c, time_t session_start) {
   switch (screen) {
     case SCREEN_STATS: draw_stats_screen(g, s);                    break;
     case SCREEN_PUMP:  draw_pump_screen(g, s, c);                  break;
     case SCREEN_INFO:  draw_info_screen(g, s, c, session_start);   break;
+    case SCREEN_COMMS: draw_comms_screen(g, s);                    break;
     default:           draw_main_screen(g, s, c);                  break;
   }
 }

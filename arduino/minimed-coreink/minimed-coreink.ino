@@ -544,6 +544,7 @@ static bool fetch_pump_data(const Config &c, State &s) {
   // device has had.
   if (server_epoch) {
     long drift = (long)(server_epoch - time(nullptr));
+    s.clockFix = (int32_t)drift;
     set_clock(server_epoch);
     if (labs(drift) >= 2) {
       Serial.printf("clock corrected from proxy by %+ld s\n", drift);
@@ -600,6 +601,13 @@ static bool fetch_pump_data(const Config &c, State &s) {
     strlcpy(s.trend, strcmp(shield, "FEATURE_OFF") ? trend : "NONE", sizeof(s.trend));
   }
   strlcpy(s.patient, doc["firstName"] | "", sizeof(s.patient));
+
+  // Which hop of pump -> phone -> CareLink is broken, for the Communication
+  // screen. Absent fields stay -1 rather than reading as "out of range".
+  if (doc["conduitMedicalDeviceInRange"].is<bool>())
+    s.pumpInRange = doc["conduitMedicalDeviceInRange"].as<bool>() ? 1 : 0;
+  if (doc["conduitInRange"].is<bool>())
+    s.phoneInRange = doc["conduitInRange"].as<bool>() ? 1 : 0;
 
   int sg = doc["lastSG"]["sg"] | 0;
   s.sg = sg > 0 ? sg : 0;
@@ -683,7 +691,13 @@ static void dump_state(const State &s, const Config &c) {
   Serial.printf("  pump battery  %d%%\n", s.batteryPct);
   Serial.printf("  patient       %s (config: %s)\n", s.patient, c.patient.c_str());
   Serial.printf("  lastUpdate    %s UTC\n", when);
+  if (s.lastUpdate && time(nullptr) > TIME_VALID_EPOCH)
+    Serial.printf("  reading age   %ld s%s\n", (long)(time(nullptr) - s.lastUpdate),
+                  time(nullptr) - s.lastUpdate >= 20 * 60 ? "  -> stale banner" : "");
   Serial.printf("  banner        '%s'\n", s.banner);
+  Serial.printf("  comms         pump-phone %d  phone-cloud %d  proxy %d  streak %u  ip %s\n",
+                s.pumpInRange, s.phoneInRange, s.rawLink, (unsigned)s.failStreak,
+                s.proxyIp[0] ? s.proxyIp : "-");
   Serial.printf("  alarm         '%s'\n", s.alarm_text);
   Serial.printf("  dstDelta      %d\n", s.dstDelta);
   Serial.printf("  stats         inRange %d  above %d  below %d  avgSG %d\n",
@@ -926,7 +940,7 @@ static void arm_toggle_wake() {
 //
 // A plain struct, where MicroPython had to serialise JSON in and out of RTC
 // memory and re-hydrate it - about 120 lines that simply do not exist here.
-#define RTC_MAGIC 0x4D4D0309u   // bump when the layout changes (State gained rssi)
+#define RTC_MAGIC 0x4D4D030Au   // bump when the layout changes (State gained the comms chain)
 
 struct RtcState {
   uint32_t magic;
@@ -1228,6 +1242,22 @@ static void refresh_battery(void) {
   rtc.snap.battState = battery_state(mv, rtc.snap.battState);
 }
 
+// The Communication screen's fields, copied into the snapshot on every poll -
+// including the ones that are not adopted, which are exactly the polls the
+// screen exists to explain.
+static void carry_comms(State &dst, const State &src) {
+  dst.pumpInRange  = src.pumpInRange;
+  dst.phoneInRange = src.phoneInRange;
+  dst.rawLink      = src.rawLink;
+  dst.failStreak   = src.failStreak;
+  dst.fetchMs      = src.fetchMs;
+  dst.wifiMs       = src.wifiMs;
+  dst.clockFix     = src.clockFix;
+  dst.lastAttempt  = src.lastAttempt;
+  dst.lastFetchOk  = src.lastFetchOk;
+  memcpy(dst.proxyIp, src.proxyIp, sizeof(dst.proxyIp));
+}
+
 void setup() {
   release_pad_hold();
   Serial.begin(115200);
@@ -1334,6 +1364,11 @@ void setup() {
     Serial.printf("wifi: failed after %lld ms, skipping cycle\n", wifi_ms);
     note_link(LINK_NO_PROXY);
     if (link_fault_confirmed()) rtc.snap.link = LINK_NO_PROXY;
+    rtc.snap.rawLink = LINK_NO_PROXY;
+    rtc.snap.failStreak = rtc.fail_streak;
+    rtc.snap.wifiMs = 0;
+    rtc.snap.fetchMs = 0;
+    if (time(nullptr) > TIME_VALID_EPOCH) rtc.snap.lastAttempt = time(nullptr);
     // BOTH of these lines are load-bearing, and their absence is what turned
     // one flaky cycle into a blank panel that "recovered by itself".
     //
@@ -1375,8 +1410,14 @@ void setup() {
   state_init(s);
   int64_t t_fetch = esp_timer_get_time();
   bool ok = fetch_pump_data(cfg, s);
-  Serial.printf("fetch+parse: %lld ms, ok=%d\n",
-                (esp_timer_get_time() - t_fetch) / 1000, (int)ok);
+  int64_t fetch_ms = (esp_timer_get_time() - t_fetch) / 1000;
+  Serial.printf("fetch+parse: %lld ms, ok=%d\n", fetch_ms, (int)ok);
+  s.fetchMs = (uint16_t)(fetch_ms > 65535 ? 65535 : fetch_ms);
+  s.wifiMs  = (uint16_t)(wifi_ms > 65535 ? 65535 : (wifi_ms < 1 ? 1 : wifi_ms));
+  s.rawLink = s.link;
+  if (time(nullptr) > TIME_VALID_EPOCH) s.lastAttempt = time(nullptr);
+  if (proxy_ip_cached)
+    snprintf(s.proxyIp, sizeof(s.proxyIp), "%s", IPAddress(proxy_ip_cached).toString().c_str());
 
   // The radio holds heap the canvas wants and costs current; down it goes
   // before drawing.
@@ -1385,6 +1426,7 @@ void setup() {
 
   note_link(s.link);
   const bool confirmed = link_fault_confirmed();
+  s.failStreak = rtc.fail_streak;
   // An empty answer carries nothing worth adopting - no reading, no alarm,
   // not even a patient name - so replacing the snapshot with it would throw
   // away the last good reading over one blip. A fetch that DID return an
@@ -1392,6 +1434,9 @@ void setup() {
   // alarm, and an alarm must never wait three cycles.
   const bool proxy_empty = (s.link == LINK_PROXY_NO_DATA || s.link == LINK_PROXY_LOGIN);
   const bool adopt = ok && !proxy_empty;
+  // "A real answer": the proxy returned pump data, whatever its content.
+  s.lastFetchOk = (ok && !proxy_empty && s.lastAttempt) ? s.lastAttempt : rtc.snap.lastFetchOk;
+  if (!s.clockFix) s.clockFix = rtc.snap.clockFix;
 
   // Say it before the field is cleared, or a building streak on an adopted
   // cycle leaves no trace at all: dump_state() below would print "link ok"
@@ -1512,6 +1557,7 @@ void setup() {
     // one; without the streak, one flaky cycle raises a banner that is gone
     // again before anyone reads it.
     if (confirmed) rtc.snap.link = s.link;
+    carry_comms(rtc.snap, s);
     // The schedule has to advance on this path too, or sleep_until() falls to
     // its 5s floor and the board spins.
     rtc.next_poll = time(nullptr) + POLL_PERIOD_S;

@@ -95,6 +95,19 @@ struct State {
   int battState;
   // 24h distribution, for the stats screen
   int timeInRange, aboveHyper, belowHypo, averageSG;
+  // The communication chain, for the Communication screen. Unlike the rest
+  // these are written into the snapshot on EVERY poll, adopted or not, so the
+  // screen still says something when the data has stopped arriving - which
+  // is the only time anyone will look at it.
+  int8_t pumpInRange;        // pump within reach of the phone; -1 = unknown
+  int8_t phoneInRange;       // phone in contact with CareLink; -1 = unknown
+  int rawLink;               // this poll's LINK_*, before the 3-cycle smoothing
+  uint8_t failStreak;        // polls in a row without a reading
+  uint16_t fetchMs, wifiMs;  // this poll's timings; wifiMs 0 = WiFi failed
+  int32_t clockFix;          // the last clock correction from the proxy, s
+  time_t lastAttempt;        // when the display last polled
+  time_t lastFetchOk;        // when the proxy last gave a real answer
+  char proxyIp[16];          // the remembered proxy address
 };
 
 inline void state_init(State &s) {
@@ -108,4 +121,6 @@ inline void state_init(State &s) {
   s.timeInRange = s.aboveHyper = s.belowHypo = s.averageSG = -1;
   s.link = LINK_OK;
   s.battState = -1;
+  s.pumpInRange = s.phoneInRange = -1;
+  s.rawLink = -1;
 }
