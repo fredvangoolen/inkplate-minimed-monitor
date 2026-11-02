@@ -101,7 +101,31 @@ only attempts networks actually in range.
 
 Slot 0 keeps the original `wifissid`/`wifipass` NVS keys, so a device
 configured before this existed needs no reconfiguration; slots 1 and 2 use
-`ssid1`/`pass1` and `ssid2`/`pass2`. The setup portal offers a second pair.
+`ssid1`/`pass1` and `ssid2`/`pass2`. The setup portal offers all three pairs.
+
+### Plan B: the Pi's hotspot
+
+Slot 2 is not a third ordinary network but the **fallback**: the
+`carelink-travel` hotspot the Pi runs next to its own WiFi connection (see
+`appliance/travel-ap` in the proxy repo). Slots 0 and 1 are plan A and are
+always preferred. Plan B is used only when plan A does not work:
+
+- no plan A network in range, or it refuses to associate;
+- **plan A joins fine but the proxy does not answer** — a holiday-house
+  router that keeps its clients apart. Measured 2026-11-02: joined in 3 s,
+  every mDNS lookup failed. The board then switches to plan B within the
+  same wake. While plan B is still untried, the proxy lookup budget is
+  6 s instead of 20 s and "Looking for the proxy" is not drawn.
+
+Once on plan B the board stays there (remembered like any other network)
+but tries plan A again every 12 cycles — one hour — and returns as soon as
+the proxy answers there. Only "nothing answered" triggers a switch; a proxy
+that answers with no data or wants a login is reachable, and switching
+networks would not change what it says. Changing networks also drops the
+cached proxy address, which differs per network (10.43.0.1 on the hotspot).
+
+Before this, slot 2 was an ordinary third network. A board with something
+there that is not the Pi's hotspot will now only use it as a last resort.
 
 A total WiFi failure still just skips the cycle and retries on the next wake —
 it must never fall into AP setup mode, which would strand a working monitor

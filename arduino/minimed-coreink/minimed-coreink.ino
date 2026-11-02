@@ -191,6 +191,13 @@ static void set_clock(time_t epoch) {
 // never needed. The cache is keyed by the configured name, so a changed
 // setting cannot reuse an address that belonged to the old one.
 static const uint32_t LOOKUP_BUDGET_MS = 20000;   // retries for a lost mDNS answer
+// While the other WiFi plan is still untried, a failing lookup is more likely
+// a network that keeps its clients apart than a lost multicast, and the other
+// plan is the better retry: so a short budget, and no "Looking for the proxy"
+// on the panel, which would otherwise flash up on every hourly plan A probe.
+static const uint32_t LOOKUP_BUDGET_SHORT_MS = 6000;
+static uint32_t lookup_budget_ms = LOOKUP_BUDGET_MS;
+static bool lookup_quiet = false;
 
 RTC_DATA_ATTR static uint32_t proxy_ip_cached;    // network byte order; 0 = none
 RTC_DATA_ATTR static uint32_t proxy_name_crc;
@@ -247,8 +254,8 @@ static bool proxy_address(const Config &c, bool fresh, bool shown, IPAddress &ip
                     ip.toString().c_str(), (unsigned)(millis() - t0), tries);
       return true;
     }
-    if (millis() - t0 >= LOOKUP_BUDGET_MS) break;
-    if (!shown) {
+    if (millis() - t0 >= lookup_budget_ms) break;
+    if (!shown && !lookup_quiet) {
       show_looking(c);
       shown = true;
     }
@@ -287,7 +294,7 @@ static bool http_get(const Config &c, const char *path,
   if (status != 0 || !was_cached) return false;
   Serial.printf("proxy: %s not answering, looking %s up again\n",
                 ip.toString().c_str(), c.proxyaddr.c_str());
-  show_looking(c);
+  if (!lookup_quiet) show_looking(c);
   if (!proxy_address(c, true, true, ip)) return false;
   return http_get_at(c, ip, path, body, status, server_epoch);
 }
@@ -370,11 +377,43 @@ static bool try_connect(const WifiNet &net, int32_t channel, const uint8_t *bssi
   return WiFi.status() == WL_CONNECTED;
 }
 
-// Remembers what worked into the RTC fields. Returns the slot index, or -1.
-static int wifi_connect(const Config &c, int remembered_slot,
+// Plan A and plan B.
+//
+// The last slot is not a third ordinary network but the FALLBACK: the Pi's
+// own hotspot (carelink-travel), which it runs alongside its normal WiFi
+// connection. Plan A is the ordinary networks, slots 0 and 1. The fallback is
+// only used when plan A does not work - absent, refusing us, or (the case it
+// exists for) joined fine but with the proxy unreachable, as on a holiday
+// network that keeps its clients apart. Measured 2026-11-02 on such a
+// network: joins in 3 s, every proxy lookup fails.
+//
+// Once on plan B the board stays there, since retrying plan A every wake
+// would cost the isolation timeout every 5 minutes, but tries plan A again
+// every PLAN_A_RETRY_CYCLES so it does go back once the normal network works.
+static const int FALLBACK_SLOT = WIFI_SLOTS - 1;
+// One hour at 300 s. Overridable so a test build can show the return in
+// minutes: -DPLAN_A_RETRY_CYCLES=2 via compiler.cpp.extra_flags.
+#ifndef PLAN_A_RETRY_CYCLES
+#define PLAN_A_RETRY_CYCLES 12
+#endif
+
+static bool is_fallback(int slot) { return slot == FALLBACK_SLOT; }
+
+// Does this plan have anything configured at all? Saves a scan for nothing.
+static bool plan_usable(const Config &c, bool fallback) {
+  for (int sl = 0; sl < WIFI_SLOTS; sl++)
+    if (is_fallback(sl) == fallback && c.wifi[sl].usable()) return true;
+  return false;
+}
+
+// Considers only the slots of one plan (fallback = plan B). The caller
+// records what worked into the RTC fields. Returns the slot index, or -1.
+static int wifi_connect(const Config &c, bool fallback, int remembered_slot,
                         int32_t remembered_channel, const uint8_t *remembered_bssid) {
+  if (!plan_usable(c, fallback)) return -1;
   // 1. The network that worked last time, with the AP hint.
   if (remembered_slot >= 0 && remembered_slot < WIFI_SLOTS &&
+      is_fallback(remembered_slot) == fallback &&
       c.wifi[remembered_slot].usable()) {
     bool hinted = remembered_channel > 0;
     if (try_connect(c.wifi[remembered_slot], remembered_channel,
@@ -407,6 +446,7 @@ static int wifi_connect(const Config &c, int remembered_slot,
   int best_slot = -1, best_rssi = -1000, best_idx = -1;
   for (int i = 0; i < found; i++) {
     for (int sl = 0; sl < WIFI_SLOTS; sl++) {
+      if (is_fallback(sl) != fallback) continue;
       if (!c.wifi[sl].usable() || WiFi.SSID(i) != c.wifi[sl].ssid) continue;
       if (WiFi.RSSI(i) > best_rssi) {
         best_rssi = WiFi.RSSI(i); best_slot = sl; best_idx = i;
@@ -414,7 +454,8 @@ static int wifi_connect(const Config &c, int remembered_slot,
     }
   }
   if (best_slot < 0) {
-    Serial.printf("wifi: none of the configured networks in range (%d seen)\n", found);
+    Serial.printf("wifi: no plan %c network in range (%d seen)\n",
+                  fallback ? 'B' : 'A', found);
     WiFi.scanDelete();
     return -1;
   }
@@ -940,7 +981,7 @@ static void arm_toggle_wake() {
 //
 // A plain struct, where MicroPython had to serialise JSON in and out of RTC
 // memory and re-hydrate it - about 120 lines that simply do not exist here.
-#define RTC_MAGIC 0x4D4D030Au   // bump when the layout changes (State gained the comms chain)
+#define RTC_MAGIC 0x4D4D030Bu   // bump when the layout changes (gained planb_cycles)
 
 struct RtcState {
   uint32_t magic;
@@ -955,6 +996,7 @@ struct RtcState {
   int32_t  wifi_channel;
   uint8_t  wifi_bssid[6];
   uint8_t  fail_streak;     // consecutive cycles that produced no reading
+  uint8_t  planb_cycles;    // poll cycles spent on the fallback since plan A was last tried
   State    snap;
 };
 
@@ -1354,7 +1396,19 @@ void setup() {
   int32_t ch = rtc.wifi_channel;
   uint8_t bssid[6];
   memcpy(bssid, rtc.wifi_bssid, 6);
-  int slot = wifi_connect(cfg, rtc.wifi_slot, ch, bssid);
+  // Plan A first - unless already on plan B and the hourly retry of plan A is
+  // not due, in which case B first: it is what worked last time.
+  const bool retry_a = is_fallback(rtc.wifi_slot) &&
+                       rtc.planb_cycles >= PLAN_A_RETRY_CYCLES;
+  const bool b_first = is_fallback(rtc.wifi_slot) && !retry_a;
+  if (retry_a) Serial.println("wifi: an hour on plan B, trying plan A again");
+  int slot = wifi_connect(cfg, b_first, rtc.wifi_slot, ch, bssid);
+  // Whether the other plan is still there to fall back to, this cycle.
+  bool other_left = plan_usable(cfg, !b_first);
+  if (slot < 0 && other_left) {
+    slot = wifi_connect(cfg, !b_first, rtc.wifi_slot, ch, bssid);
+    other_left = false;
+  }
   int64_t wifi_ms = (esp_timer_get_time() - t_wifi) / 1000;
 
   if (slot < 0) {
@@ -1388,19 +1442,28 @@ void setup() {
     rtc.cycle++;
     sleep_until(rtc.next_poll);
   }
+  String local_ip;
+  int wifi_rssi = 0;
   // Remember what worked, so the next wake is one attempt and no scan.
-  rtc.wifi_slot = slot;
-  rtc.wifi_channel = WiFi.channel();
-  if (WiFi.BSSID()) memcpy(rtc.wifi_bssid, WiFi.BSSID(), 6);
-  // Captured NOW, while the radio is still up. Read after WiFi.mode(WIFI_OFF)
-  // it comes back 0.0.0.0, which is what the info screen was showing.
-  String local_ip = WiFi.localIP().toString();
-  int wifi_rssi = WiFi.RSSI();   // read now: the radio goes down before the snapshot
-  // RSSI so a slow fetch can be told apart: board .14 took 19.8 s where .24,
-  // in the same spot, took 0.1 s, and nothing else in the log said why.
-  Serial.printf("wifi: connected in %lld ms, ip %s, ssid %s ch %d rssi %d\n",
-                wifi_ms, local_ip.c_str(), WiFi.SSID().c_str(), (int)WiFi.channel(),
-                (int)WiFi.RSSI());
+  auto note_wifi = [&](int sl) {
+    // Another network: the proxy's address there is another one too (the Pi
+    // is 10.43.0.1 on its hotspot, something else on the house LAN), so the
+    // cached one would only cost a connect timeout before the lookup.
+    if (sl != rtc.wifi_slot) proxy_ip_cached = 0;
+    rtc.wifi_slot = sl;
+    rtc.wifi_channel = WiFi.channel();
+    if (WiFi.BSSID()) memcpy(rtc.wifi_bssid, WiFi.BSSID(), 6);
+    // Captured NOW, while the radio is still up. Read after WiFi.mode(WIFI_OFF)
+    // it comes back 0.0.0.0, which is what the info screen was showing.
+    local_ip = WiFi.localIP().toString();
+    wifi_rssi = WiFi.RSSI();   // read now: the radio goes down before the snapshot
+    // RSSI so a slow fetch can be told apart: board .14 took 19.8 s where .24,
+    // in the same spot, took 0.1 s, and nothing else in the log said why.
+    Serial.printf("wifi: connected in %lld ms, ip %s, ssid %s ch %d rssi %d (plan %c)\n",
+                  wifi_ms, local_ip.c_str(), WiFi.SSID().c_str(), (int)WiFi.channel(),
+                  wifi_rssi, is_fallback(sl) ? 'B' : 'A');
+  };
+  note_wifi(slot);
 
 #if PORTAL_TEST
   run_config_portal_sta(cfg);   // blocks; reboots when a config is submitted
@@ -1409,7 +1472,29 @@ void setup() {
   State s;
   state_init(s);
   int64_t t_fetch = esp_timer_get_time();
+  lookup_budget_ms = other_left ? LOOKUP_BUDGET_SHORT_MS : LOOKUP_BUDGET_MS;
+  lookup_quiet = other_left;
   bool ok = fetch_pump_data(cfg, s);
+  // Joined, but nothing answered: the network may keep its clients apart.
+  // Only LINK_NO_PROXY - a proxy that answered, even with nothing, is
+  // reachable, and switching networks would not change what it says.
+  if (s.link == LINK_NO_PROXY && other_left) {
+    Serial.printf("fetch: no proxy via %s, switching to plan %c\n",
+                  cfg.wifi[slot].ssid.c_str(), is_fallback(slot) ? 'A' : 'B');
+    int64_t t_switch = esp_timer_get_time();
+    int other = wifi_connect(cfg, !is_fallback(slot), -1, 0, nullptr);
+    wifi_ms += (esp_timer_get_time() - t_switch) / 1000;
+    if (other >= 0) {
+      slot = other;
+      note_wifi(slot);
+      lookup_budget_ms = LOOKUP_BUDGET_MS;
+      lookup_quiet = false;
+      state_init(s);
+      ok = fetch_pump_data(cfg, s);
+    }
+  }
+  // Counts toward the hourly plan A retry; a cycle that just made it starts over.
+  rtc.planb_cycles = (is_fallback(slot) && !retry_a) ? rtc.planb_cycles + 1 : 0;
   int64_t fetch_ms = (esp_timer_get_time() - t_fetch) / 1000;
   Serial.printf("fetch+parse: %lld ms, ok=%d\n", fetch_ms, (int)ok);
   s.fetchMs = (uint16_t)(fetch_ms > 65535 ? 65535 : fetch_ms);

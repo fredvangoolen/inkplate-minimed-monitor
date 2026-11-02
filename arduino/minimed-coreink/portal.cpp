@@ -52,6 +52,10 @@ static String config_page(const Config &c) {
     "<input type='text' name='fssid1'></td>"
     "<tr style=\"background-color:rgb(230,230,255)\"><td>2nd password<br>"
     "<input type='text' name='fpass1'></td>"
+    "<tr style=\"background-color:rgb(230,230,255)\"><td>Fallback SSID (optional: the Pi's own hotspot, used only when the networks above do not reach the proxy)<br>"
+    "<input type='text' name='fssid2'></td>"
+    "<tr style=\"background-color:rgb(230,230,255)\"><td>Fallback password<br>"
+    "<input type='text' name='fpass2'></td>"
     "</tbody></table><br>"
     "<table style=\"text-align:left;width:400px;background-color:white;"
     "font-weight:bold;font-size:14px\" cellpadding=2 cellspacing=3><tbody>"
@@ -187,6 +191,9 @@ static void serve(Config c, bool use_ap) {
     // required, and absent values simply clear the slot.
     String ssid1 = server.arg("fssid1");
     String pass1 = server.arg("fpass1");
+    // Optional fallback (slot 2, plan B): the Pi's carelink-travel hotspot.
+    String ssid2 = server.arg("fssid2");
+    String pass2 = server.arg("fpass2");
 
     // Patient name is deliberately NOT required: the proxy reports
     // firstName, so a device never told a name still shows the right one.
@@ -208,6 +215,8 @@ static void serve(Config c, bool use_ap) {
     p.putString("patient",   pat);
     p.putString("ssid1",     ssid1);
     p.putString("pass1",     pass1);
+    p.putString("ssid2",     ssid2);
+    p.putString("pass2",     pass2);
     p.putUShort("proxyport", (uint16_t)port.toInt());
     p.putInt("timezone",     tz.toInt());
     p.end();
