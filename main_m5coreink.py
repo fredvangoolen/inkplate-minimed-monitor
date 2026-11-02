@@ -1242,6 +1242,11 @@ def read_config():
 # and retries on the next wake instead.
 WIFI_CONNECT_TIMEOUT_S = 25
 
+# NOT PORTED: the C++ build (arduino/minimed-coreink) has up to three networks
+# and a plan B - the Pi's carelink-travel hotspot, used when the normal WiFi
+# does not reach the proxy (a router that keeps its clients apart). This build
+# knows one network only, and was deliberately left behind (2026-11-02): it is
+# a fallback that no board can run without a rebuilt UIFlow image.
 def wlan_connect(wifissid, wifipass):
    wlan = network.WLAN(network.STA_IF)
    wlan.active(True)
